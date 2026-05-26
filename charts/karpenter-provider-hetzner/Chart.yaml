@@ -1,0 +1,6 @@
+apiVersion: v2
+name: karpenter-provider-hetzner
+description: Karpenter cloud provider for Hetzner Cloud
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
