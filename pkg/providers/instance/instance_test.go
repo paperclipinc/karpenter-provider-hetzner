@@ -1,0 +1,234 @@
+package instance
+
+import (
+	"context"
+	"testing"
+
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+)
+
+// mockServerClient is a fake ServerClient for testing.
+type mockServerClient struct {
+	servers map[int64]*hcloud.Server
+	nextID  int64
+	deleted []int64
+}
+
+func newMockServerClient() *mockServerClient {
+	return &mockServerClient{
+		servers: make(map[int64]*hcloud.Server),
+		nextID:  100,
+	}
+}
+
+func (m *mockServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpts) (hcloud.ServerCreateResult, *hcloud.Response, error) {
+	id := m.nextID
+	m.nextID++
+	server := &hcloud.Server{
+		ID:         id,
+		Name:       opts.Name,
+		Labels:     opts.Labels,
+		ServerType: opts.ServerType,
+		Location:   opts.Location,
+	}
+	m.servers[id] = server
+	return hcloud.ServerCreateResult{Server: server}, nil, nil
+}
+
+func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Server) (*hcloud.ServerDeleteResult, *hcloud.Response, error) {
+	delete(m.servers, server.ID)
+	m.deleted = append(m.deleted, server.ID)
+	return &hcloud.ServerDeleteResult{}, nil, nil
+}
+
+func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server, *hcloud.Response, error) {
+	server, ok := m.servers[id]
+	if !ok {
+		return nil, nil, nil
+	}
+	return server, nil, nil
+}
+
+func (m *mockServerClient) AllWithOpts(_ context.Context, _ hcloud.ServerListOpts) ([]*hcloud.Server, error) {
+	result := make([]*hcloud.Server, 0, len(m.servers))
+	for _, s := range m.servers {
+		result = append(result, s)
+	}
+	return result, nil
+}
+
+func TestCreate_LabelsApplied(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client)
+
+	server, err := p.Create(context.Background(), CreateOpts{
+		Name:       "test-node",
+		ServerType: "cx11",
+		Location:   "nbg1",
+		Image:      &hcloud.Image{ID: 1},
+		NodeClaim:  "my-claim",
+		NodePool:   "my-pool",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected server, got nil")
+	}
+
+	// Verify management labels.
+	if server.Labels[v1alpha1.ServerLabelManagedBy] != v1alpha1.ServerValueManagedBy {
+		t.Errorf("missing managed-by label, got %q", server.Labels[v1alpha1.ServerLabelManagedBy])
+	}
+	if server.Labels[v1alpha1.ServerLabelNodeClaim] != "my-claim" {
+		t.Errorf("expected nodeclaim label 'my-claim', got %q", server.Labels[v1alpha1.ServerLabelNodeClaim])
+	}
+	if server.Labels[v1alpha1.ServerLabelNodePool] != "my-pool" {
+		t.Errorf("expected nodepool label 'my-pool', got %q", server.Labels[v1alpha1.ServerLabelNodePool])
+	}
+}
+
+func TestCreate_CustomLabelsPreserved(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client)
+
+	server, err := p.Create(context.Background(), CreateOpts{
+		Name:       "test-node",
+		ServerType: "cx11",
+		Location:   "nbg1",
+		Image:      &hcloud.Image{ID: 1},
+		Labels:     map[string]string{"env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if server.Labels["env"] != "prod" {
+		t.Errorf("expected custom label env=prod, got %q", server.Labels["env"])
+	}
+}
+
+func TestDelete_RemovesServer(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[42] = &hcloud.Server{ID: 42, Name: "node-42"}
+	p := NewProvider(client)
+
+	err := p.Delete(context.Background(), "hcloud://42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := client.servers[42]; ok {
+		t.Error("expected server to be deleted")
+	}
+}
+
+func TestDelete_Idempotent(t *testing.T) {
+	// Deleting a server that doesn't exist should not return an error.
+	client := newMockServerClient()
+	p := NewProvider(client)
+
+	err := p.Delete(context.Background(), "hcloud://999")
+	if err != nil {
+		t.Fatalf("expected nil error for non-existent server, got: %v", err)
+	}
+}
+
+func TestGet_Found(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[77] = &hcloud.Server{ID: 77, Name: "my-node"}
+	p := NewProvider(client)
+
+	server, err := p.Get(context.Background(), "hcloud://77")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected server, got nil")
+	}
+	if server.ID != 77 {
+		t.Errorf("expected ID=77, got %d", server.ID)
+	}
+}
+
+func TestGet_NotFound(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client)
+
+	server, err := p.Get(context.Background(), "hcloud://999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if server != nil {
+		t.Errorf("expected nil server for missing ID, got %+v", server)
+	}
+}
+
+func TestList(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[1] = &hcloud.Server{ID: 1, Name: "node-1"}
+	client.servers[2] = &hcloud.Server{ID: 2, Name: "node-2"}
+	p := NewProvider(client)
+
+	servers, err := p.List(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Errorf("expected 2 servers, got %d", len(servers))
+	}
+}
+
+func TestParseProviderID_Valid(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected int64
+	}{
+		{"hcloud://123", 123},
+		{"hcloud://999999", 999999},
+		{"hcloud://1", 1},
+	}
+	for _, tc := range cases {
+		id, err := ParseProviderID(tc.input)
+		if err != nil {
+			t.Errorf("ParseProviderID(%q) unexpected error: %v", tc.input, err)
+			continue
+		}
+		if id != tc.expected {
+			t.Errorf("ParseProviderID(%q) = %d, want %d", tc.input, id, tc.expected)
+		}
+	}
+}
+
+func TestParseProviderID_Invalid(t *testing.T) {
+	cases := []string{
+		"123",
+		"aws://123",
+		"hcloud://abc",
+		"hcloud://",
+		"",
+	}
+	for _, tc := range cases {
+		_, err := ParseProviderID(tc)
+		if err == nil {
+			t.Errorf("ParseProviderID(%q) expected error, got nil", tc)
+		}
+	}
+}
+
+func TestFormatProviderID(t *testing.T) {
+	cases := []struct {
+		id       int64
+		expected string
+	}{
+		{123, "hcloud://123"},
+		{1, "hcloud://1"},
+		{999999, "hcloud://999999"},
+	}
+	for _, tc := range cases {
+		got := FormatProviderID(tc.id)
+		if got != tc.expected {
+			t.Errorf("FormatProviderID(%d) = %q, want %q", tc.id, got, tc.expected)
+		}
+	}
+}
