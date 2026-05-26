@@ -73,8 +73,8 @@ func (in *HCloudNodeClass) SetConditions(conditions []status.Condition) {
 	in.Status.Conditions = conditions
 }
 
-func (in *HCloudNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
-	return conditionTypes.For(in, opts...)
+func (in *HCloudNodeClass) StatusConditions() status.ConditionSet {
+	return conditionTypes.For(in)
 }
 
 // +kubebuilder:object:root=true
