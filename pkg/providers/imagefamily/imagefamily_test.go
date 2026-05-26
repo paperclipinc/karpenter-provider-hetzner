@@ -1,0 +1,182 @@
+package imagefamily
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+)
+
+// mockImageClient is a fake ImageClient for testing.
+type mockImageClient struct {
+	images []*hcloud.Image
+}
+
+func (m *mockImageClient) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	var result []*hcloud.Image
+	for _, img := range m.images {
+		// Filter by type if specified.
+		if len(opts.Type) > 0 {
+			match := false
+			for _, t := range opts.Type {
+				if img.Type == t {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		// Filter by architecture if specified.
+		if len(opts.Architecture) > 0 {
+			match := false
+			for _, a := range opts.Architecture {
+				if img.Architecture == a {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		result = append(result, img)
+	}
+	return result, nil
+}
+
+func makeImage(id int64, imgType hcloud.ImageType, arch hcloud.Architecture, description string, created time.Time) *hcloud.Image {
+	return &hcloud.Image{
+		ID:           id,
+		Type:         imgType,
+		Architecture: arch,
+		Description:  description,
+		Created:      created,
+	}
+}
+
+var baseTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestResolveUbuntu_PicksFirst(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 22.04", baseTime),
+		makeImage(2, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 20.04", baseTime),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureX86)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if img.ID != 1 {
+		t.Errorf("expected first match (ID=1), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveUbuntu_VersionPin(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 22.04", baseTime),
+		makeImage(2, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 20.04", baseTime),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu", Version: "20.04"}, hcloud.ArchitectureX86)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if img.ID != 2 {
+		t.Errorf("expected ID=2 (Ubuntu 20.04), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveUbuntu_ArchFilter(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSystem, hcloud.ArchitectureARM, "Ubuntu 22.04 ARM", baseTime),
+		makeImage(2, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 22.04", baseTime),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureARM)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if img.ID != 1 {
+		t.Errorf("expected ARM image (ID=1), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveUbuntu_NoMatch(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 22.04", baseTime),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	_, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu", Version: "24.04"}, hcloud.ArchitectureX86)
+	if err == nil {
+		t.Fatal("expected error for no matching image, got nil")
+	}
+}
+
+func TestResolveTalos_PicksNewest(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.6.0", baseTime),
+		makeImage(2, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.7.0", baseTime.Add(24*time.Hour)),
+		makeImage(3, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.5.0", baseTime.Add(-24*time.Hour)),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if img.ID != 2 {
+		t.Errorf("expected newest talos (ID=2), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveTalos_VersionPin(t *testing.T) {
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.6.0", baseTime),
+		makeImage(2, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.7.0", baseTime.Add(24*time.Hour)),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos", Version: "v1.6.0"}, hcloud.ArchitectureX86)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if img.ID != 1 {
+		t.Errorf("expected talos v1.6.0 (ID=1), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveTalos_IgnoresSystemImages(t *testing.T) {
+	// talos images must be snapshots; system images called "talos" should be ignored.
+	images := []*hcloud.Image{
+		makeImage(1, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "talos system", baseTime),
+		makeImage(2, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.7.0", baseTime),
+	}
+	p := NewProvider(&mockImageClient{images: images})
+
+	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Only the snapshot should be found.
+	if img.ID != 2 {
+		t.Errorf("expected snapshot talos (ID=2), got ID=%d", img.ID)
+	}
+}
+
+func TestResolveUnsupportedFamily(t *testing.T) {
+	p := NewProvider(&mockImageClient{})
+
+	_, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "fedora"}, hcloud.ArchitectureX86)
+	if err == nil {
+		t.Fatal("expected error for unsupported family, got nil")
+	}
+}
