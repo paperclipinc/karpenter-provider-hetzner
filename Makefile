@@ -1,8 +1,9 @@
-.PHONY: build test lint generate docker-build
+.PHONY: build test lint generate generate-verify docker-build
 
-BINARY := karpenter-provider-hetzner
-IMAGE  := ghcr.io/paperclipinc/karpenter-provider-hetzner
-TAG    ?= latest
+BINARY         := karpenter-provider-hetzner
+IMAGE          := ghcr.io/paperclipinc/karpenter-provider-hetzner
+TAG            ?= latest
+CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0
 
 build:
 	go build -o bin/$(BINARY) ./cmd/controller
@@ -14,8 +15,15 @@ lint:
 	golangci-lint run ./...
 
 generate:
-	controller-gen object paths="./pkg/apis/..."
-	controller-gen crd paths="./pkg/apis/..." output:crd:dir=charts/karpenter-provider-hetzner/crds
+	$(CONTROLLER_GEN) object paths="./pkg/apis/..."
+	$(CONTROLLER_GEN) crd paths="./pkg/apis/..." output:crd:dir=charts/karpenter-provider-hetzner/crds
+
+generate-verify: generate
+	@if [ -n "$$(git status --porcelain pkg/apis charts/karpenter-provider-hetzner/crds)" ]; then \
+		echo "generated files are out of date; run 'make generate' and commit"; \
+		git --no-pager diff -- pkg/apis charts/karpenter-provider-hetzner/crds; \
+		exit 1; \
+	fi
 
 docker-build:
 	docker build -t $(IMAGE):$(TAG) .
