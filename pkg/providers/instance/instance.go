@@ -46,17 +46,17 @@ func NewProviderWithWaiter(client ServerClient, clusterName string, waiter Actio
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
 type CreateOpts struct {
-	Name        string
-	ServerType  string
-	Location    string
-	Image       *hcloud.Image
-	NetworkID   int64
-	FirewallIDs []int64
-	SSHKeyIDs   []int64
-	Labels      map[string]string
-	UserData    string
-	NodeClaim   string
-	NodePool    string
+	Name             string
+	ServerType       string
+	Location         string
+	Image            *hcloud.Image
+	NetworkID        int64
+	FirewallIDs      []int64
+	SSHKeyIDs        []int64
+	Labels           map[string]string
+	UserData         string
+	NodeClaim        string
+	NodePool         string
 	EnablePublicIPv4 bool
 	EnablePublicIPv6 bool
 }

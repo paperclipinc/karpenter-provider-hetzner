@@ -69,7 +69,7 @@ func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server,
 }
 
 func (m *mockServerClient) AllWithOpts(_ context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error) {
-	m.lastListSelector = opts.ListOpts.LabelSelector
+	m.lastListSelector = opts.LabelSelector
 	result := make([]*hcloud.Server, 0, len(m.servers))
 	for _, s := range m.servers {
 		result = append(result, s)

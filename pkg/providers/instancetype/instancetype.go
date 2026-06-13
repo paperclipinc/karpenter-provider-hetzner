@@ -110,9 +110,16 @@ func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*clo
 			cp.Available = !p.unavailable.isUnavailable(it.Name, zone)
 			offerings[j] = &cp
 		}
-		nt := *it
-		nt.Offerings = offerings
-		out[i] = &nt
+		// Construct a fresh InstanceType (rather than copying *it) to avoid
+		// copying the embedded sync.Once (govet copylocks); Requirements/Capacity/
+		// Overhead are intentionally shared read-only with the cached entry.
+		out[i] = &cloudprovider.InstanceType{
+			Name:         it.Name,
+			Offerings:    offerings,
+			Requirements: it.Requirements,
+			Capacity:     it.Capacity,
+			Overhead:     it.Overhead,
+		}
 	}
 	return out
 }
