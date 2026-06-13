@@ -12,6 +12,13 @@ func TestStatusConditionsIncludeDependents(t *testing.T) {
 	}
 }
 
+func TestUserDataReadyConditionRegistered(t *testing.T) {
+	nc := &HCloudNodeClass{}
+	if nc.StatusConditions().Get(ConditionTypeUserDataReady) == nil {
+		t.Errorf("expected condition %q to be registered", ConditionTypeUserDataReady)
+	}
+}
+
 func TestPublicIPDefaultsHelper(t *testing.T) {
 	nc := &HCloudNodeClass{}
 	if !nc.Spec.PublicIPv4Enabled() {

@@ -10,6 +10,7 @@ const (
 	ConditionTypeImagesReady    = "ImagesReady"
 	ConditionTypeNetworkReady   = "NetworkReady"
 	ConditionTypeResourcesReady = "ResourcesReady"
+	ConditionTypeUserDataReady  = "UserDataReady"
 )
 
 // +kubebuilder:object:root=true
@@ -49,6 +50,12 @@ type HCloudNodeClassSpec struct {
 	// +optional
 	UserData string `json:"userData,omitempty"`
 
+	// UserDataSecretRef sources userData from a Secret instead of inline. When
+	// set, it takes precedence over UserData. The Secret is read at server-create
+	// time; its value never appears in the NodeClass spec, status, or git.
+	// +optional
+	UserDataSecretRef *UserDataSecretReference `json:"userDataSecretRef,omitempty"`
+
 	// EnablePublicIPv4 controls whether created servers get a public IPv4.
 	// Defaults to true (Hetzner's default). Set false on private-network
 	// clusters to avoid the primary-IPv4 charge.
@@ -61,6 +68,16 @@ type HCloudNodeClassSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	EnablePublicIPv6 *bool `json:"enablePublicIPv6,omitempty"`
+}
+
+// UserDataSecretReference points at a Secret key holding the server userData.
+type UserDataSecretReference struct {
+	// Namespace of the Secret (required: HCloudNodeClass is cluster-scoped).
+	Namespace string `json:"namespace"`
+	// Name of the Secret.
+	Name string `json:"name"`
+	// Key within the Secret's data holding the userData.
+	Key string `json:"key"`
 }
 
 type ImageSelector struct {
@@ -83,7 +100,7 @@ type HCloudNodeClassStatus struct {
 	ResolvedImages []ResolvedImage `json:"resolvedImages,omitempty"`
 }
 
-var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady)
+var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady, ConditionTypeUserDataReady)
 
 func (in *HCloudNodeClass) GetConditions() []status.Condition {
 	return in.Status.Conditions

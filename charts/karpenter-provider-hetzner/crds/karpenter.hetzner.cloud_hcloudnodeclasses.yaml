@@ -101,6 +101,27 @@ spec:
                 type: array
               userData:
                 type: string
+              userDataSecretRef:
+                description: |-
+                  UserDataSecretRef sources userData from a Secret instead of inline. When
+                  set, it takes precedence over UserData. The Secret is read at server-create
+                  time; its value never appears in the NodeClass spec, status, or git.
+                properties:
+                  key:
+                    description: Key within the Secret's data holding the userData.
+                    type: string
+                  name:
+                    description: Name of the Secret.
+                    type: string
+                  namespace:
+                    description: 'Namespace of the Secret (required: HCloudNodeClass
+                      is cluster-scoped).'
+                    type: string
+                required:
+                - key
+                - name
+                - namespace
+                type: object
             required:
             - imageSelector
             - locations
