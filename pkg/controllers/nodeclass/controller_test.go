@@ -44,6 +44,19 @@ func (emptyImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hc
 	return nil, nil
 }
 
+// amd64OnlyImages returns an image for amd64/x86 requests and nothing for arm64,
+// mimicking a cluster that only has an x86 OS image (the common case).
+type amd64OnlyImages struct{ img *hcloud.Image }
+
+func (f amd64OnlyImages) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	for _, a := range opts.Architecture {
+		if a == hcloud.ArchitectureX86 {
+			return []*hcloud.Image{f.img}, nil
+		}
+	}
+	return nil, nil
+}
+
 func newNodeClass() *v1alpha1.HCloudNodeClass {
 	return &v1alpha1.HCloudNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
@@ -85,6 +98,34 @@ func TestReconcile_SetsReadyWhenValid(t *testing.T) {
 	}
 	if !got.StatusConditions().Root().IsTrue() {
 		t.Error("Ready should be true when all dependents are true")
+	}
+}
+
+func TestReconcile_SingleArchImageIsReady(t *testing.T) {
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	// Cluster only has an amd64 image (no arm64) — the NodeClass must still be Ready.
+	img := imagefamily.NewProvider(amd64OnlyImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &v1alpha1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.StatusConditions().Get(v1alpha1.ConditionTypeImagesReady).IsTrue() {
+		t.Error("ImagesReady should be true when at least one arch resolves")
+	}
+	if !got.StatusConditions().Root().IsTrue() {
+		t.Error("Ready should be true with a single-arch image")
+	}
+	if len(got.Status.ResolvedImages) != 1 || got.Status.ResolvedImages[0].Architecture != "x86" {
+		t.Errorf("expected exactly one x86 resolved image, got %+v", got.Status.ResolvedImages)
 	}
 }
 
