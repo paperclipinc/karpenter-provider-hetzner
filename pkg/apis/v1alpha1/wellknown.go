@@ -11,6 +11,5 @@ func init() {
 	karpv1.WellKnownLabels = karpv1.WellKnownLabels.Insert(
 		LabelCPUType,
 		LabelServerFamily,
-		LabelLocation,
 	)
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func TestCustomLabelsRegisteredAsWellKnown(t *testing.T) {
-	for _, l := range []string{LabelCPUType, LabelServerFamily, LabelLocation} {
+	for _, l := range []string{LabelCPUType, LabelServerFamily} {
 		if !karpv1.WellKnownLabels.Has(l) {
 			t.Errorf("label %q must be registered in karpv1.WellKnownLabels", l)
 		}
