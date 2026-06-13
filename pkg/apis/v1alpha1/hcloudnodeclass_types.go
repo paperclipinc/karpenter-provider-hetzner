@@ -14,7 +14,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:categories=karpenter,shortName=hcnc
+// +kubebuilder:resource:categories=karpenter,shortName=hcnc,scope=Cluster
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 type HCloudNodeClass struct {
 	metav1.TypeMeta   `json:",inline"`

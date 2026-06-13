@@ -16,7 +16,7 @@ spec:
     shortNames:
     - hcnc
     singular: hcloudnodeclass
-  scope: Namespaced
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
