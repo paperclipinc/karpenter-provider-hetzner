@@ -153,8 +153,8 @@ cluster identifier. Two clusters sharing one Hetzner project would list and GC
 each other's nodes.
 
 **Change:**
-- Introduce a required `CLUSTER_NAME` configuration (env var + `--cluster-name`
-  flag + Helm value). Fail fast at startup if unset.
+- Introduce a required `CLUSTER_NAME` configuration (env var + Helm value).
+  Fail fast at startup if unset, and validate it against Hetzner's label charset.
 - Tag every created server with `karpenter.sh/cluster=<name>` in addition to the
   managed-by label.
 - Filter `List` (and therefore GC) by the cluster label so the provider only ever
@@ -171,9 +171,15 @@ is only 38 lines (the 8-method interface is barely covered); no controller tests
 - Table-driven unit tests for: Hetzner error-mapping, the unavailable-offerings
   cache (mark/expire/skip), the full drift matrix, Net pricing + IPv4 folding,
   and cluster-label tagging/filtering.
-- **envtest** coverage for the NodeClass controller: conditions transition
+- Controller coverage for the NodeClass reconciler: conditions transition
   correctly and `Status.ResolvedImages` is populated for valid specs; invalid
   specs (missing network/firewall/image) set the right not-ready condition.
+  **Decision:** these tests use the controller-runtime fake client rather than a
+  full envtest apiserver. The fake client exercises the real reconcile logic and
+  persists status via the status subresource, which covers the behavior we care
+  about without adding the `setup-envtest` binary dependency (and its CI
+  flakiness). A `make test-envtest` target is wired for future tests that need a
+  real apiserver.
 - Raise `cloudprovider_test.go` to exercise all 8 methods against a fake hcloud
   client (Create/Delete/Get/List/IsDrifted/GetInstanceTypes/Name/RepairPolicies).
 - Coverage target: every new branch exercised. Real e2e on `mono` is spec #2.
@@ -196,4 +202,5 @@ is only 38 lines (the 8-method interface is barely covered); no controller tests
 - Every declared `DriftReason` is implemented (or removed + documented).
 - Servers are cluster-scoped via `CLUSTER_NAME`; a second cluster in the same
   project is invisible to this one.
-- New unit + envtest coverage is green; no faked/half-built feature remains.
+- New unit + controller (fake-client) coverage is green; no faked/half-built
+  feature remains.
