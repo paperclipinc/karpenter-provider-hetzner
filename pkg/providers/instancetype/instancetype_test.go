@@ -35,11 +35,11 @@ func makeServerType(name string, arch hcloud.Architecture, cpuType hcloud.CPUTyp
 var testPricings = []hcloud.ServerTypeLocationPricing{
 	{
 		Location: &hcloud.Location{Name: "nbg1"},
-		Monthly:  hcloud.Price{Gross: "7.3000000000"},
+		Monthly:  hcloud.Price{Net: "7.3000000000"},
 	},
 	{
 		Location: &hcloud.Location{Name: "fsn1"},
-		Monthly:  hcloud.Price{Gross: "7.3000000000"},
+		Monthly:  hcloud.Price{Net: "7.3000000000"},
 	},
 }
 
