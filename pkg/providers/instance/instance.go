@@ -21,12 +21,13 @@ type ServerClient interface {
 
 // Provider wraps hcloud server CRUD operations for Karpenter.
 type Provider struct {
-	client ServerClient
+	client      ServerClient
+	clusterName string
 }
 
 // NewProvider creates a new instance provider.
-func NewProvider(client ServerClient) *Provider {
-	return &Provider{client: client}
+func NewProvider(client ServerClient, clusterName string) *Provider {
+	return &Provider{client: client, clusterName: clusterName}
 }
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
@@ -51,6 +52,7 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		labels[k] = v
 	}
 	labels[v1alpha1.ServerLabelManagedBy] = v1alpha1.ServerValueManagedBy
+	labels[v1alpha1.ServerLabelCluster] = p.clusterName
 	if opts.NodeClaim != "" {
 		labels[v1alpha1.ServerLabelNodeClaim] = opts.NodeClaim
 	}
@@ -148,7 +150,9 @@ func (p *Provider) Get(ctx context.Context, providerID string) (*hcloud.Server, 
 func (p *Provider) List(ctx context.Context) ([]*hcloud.Server, error) {
 	opts := hcloud.ServerListOpts{
 		ListOpts: hcloud.ListOpts{
-			LabelSelector: v1alpha1.ServerLabelManagedBy + "=" + v1alpha1.ServerValueManagedBy,
+			LabelSelector: fmt.Sprintf("%s=%s,%s=%s",
+				v1alpha1.ServerLabelManagedBy, v1alpha1.ServerValueManagedBy,
+				v1alpha1.ServerLabelCluster, p.clusterName),
 		},
 	}
 	servers, err := p.client.AllWithOpts(ctx, opts)

@@ -31,8 +31,14 @@ func main() {
 		return
 	}
 
+	cfg, err := hetznerop.LoadConfig()
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to load config")
+		return
+	}
+
 	// Create the three providers.
-	instanceProvider := instance.NewProvider(&hcloudClient.Server)
+	instanceProvider := instance.NewProvider(&hcloudClient.Server, cfg.ClusterName)
 	typeProvider := instancetype.NewProvider(&hcloudClient.ServerType)
 	imageProvider := imagefamily.NewProvider(&hcloudClient.Image)
 

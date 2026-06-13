@@ -11,6 +11,7 @@ const (
 	ProviderIDPrefix = "hcloud://"
 
 	ServerLabelManagedBy = "karpenter.sh/managed-by"
+	ServerLabelCluster   = "karpenter.sh/cluster"
 	ServerLabelNodeClaim = "karpenter.sh/nodeclaim"
 	ServerLabelNodePool  = "karpenter.sh/nodepool"
 	ServerValueManagedBy = "karpenter"
