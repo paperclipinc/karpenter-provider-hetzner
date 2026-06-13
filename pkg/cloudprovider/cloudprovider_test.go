@@ -212,9 +212,9 @@ func TestIsDrifted_FirewallAttached_NoDrift(t *testing.T) {
 
 func TestIsDrifted_ServerType(t *testing.T) {
 	server := baselineServer()
+	server.ServerType = &hcloud.ServerType{Name: "cx32"} // live server is cx32
 	cp, nodeClaim := buildCP(t, baselineNodeClass(), server)
-	// Desired (claim label) is cx22; mutate the live server type to differ.
-	server.ServerType = &hcloud.ServerType{Name: "cx32"}
+	nodeClaim.Labels[corev1.LabelInstanceTypeStable] = "cx22" // desired was cx22
 	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
 	if err != nil {
 		t.Fatal(err)

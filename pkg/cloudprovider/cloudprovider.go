@@ -274,6 +274,8 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	}
 
 	// Firewall drift: every NodeClass firewall must be attached to the server.
+	// This is a subset check only; firewalls attached beyond the NodeClass spec
+	// (e.g. applied out-of-band) are permitted and do not count as drift.
 	if len(nodeClass.Spec.FirewallIDs) > 0 {
 		attached := make(map[int64]bool, len(server.PublicNet.Firewalls))
 		for _, fw := range server.PublicNet.Firewalls {
@@ -290,7 +292,9 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	}
 
 	// Server-type drift: the running server type must match the type recorded on
-	// the NodeClaim's instance-type label.
+	// the NodeClaim's instance-type label. An absent label (e.g. a NodeClaim not
+	// created by this provider) intentionally skips the check rather than
+	// reporting false drift.
 	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
 		server.ServerType != nil && server.ServerType.Name != want {
 		return DriftServerType, nil
