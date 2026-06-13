@@ -5,6 +5,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Status condition types for HCloudNodeClass.
+const (
+	ConditionTypeImagesReady  = "ImagesReady"
+	ConditionTypeNetworkReady = "NetworkReady"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=karpenter,shortName=hcnc
@@ -41,6 +47,17 @@ type HCloudNodeClassSpec struct {
 
 	// +optional
 	UserData string `json:"userData,omitempty"`
+
+	// EnablePublicIPv4 controls whether created servers get a public IPv4.
+	// Defaults to true (Hetzner's default). Set false on private-network
+	// clusters to avoid the primary-IPv4 charge.
+	// +optional
+	EnablePublicIPv4 *bool `json:"enablePublicIPv4,omitempty"`
+
+	// EnablePublicIPv6 controls whether created servers get a public IPv6.
+	// Defaults to true.
+	// +optional
+	EnablePublicIPv6 *bool `json:"enablePublicIPv6,omitempty"`
 }
 
 type ImageSelector struct {
@@ -63,7 +80,7 @@ type HCloudNodeClassStatus struct {
 	ResolvedImages []ResolvedImage `json:"resolvedImages,omitempty"`
 }
 
-var conditionTypes = status.NewReadyConditions()
+var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady)
 
 func (in *HCloudNodeClass) GetConditions() []status.Condition {
 	return in.Status.Conditions
@@ -75,6 +92,16 @@ func (in *HCloudNodeClass) SetConditions(conditions []status.Condition) {
 
 func (in *HCloudNodeClass) StatusConditions() status.ConditionSet {
 	return conditionTypes.For(in)
+}
+
+// PublicIPv4Enabled reports whether public IPv4 should be enabled (default true).
+func (s HCloudNodeClassSpec) PublicIPv4Enabled() bool {
+	return s.EnablePublicIPv4 == nil || *s.EnablePublicIPv4
+}
+
+// PublicIPv6Enabled reports whether public IPv6 should be enabled (default true).
+func (s HCloudNodeClassSpec) PublicIPv6Enabled() bool {
+	return s.EnablePublicIPv6 == nil || *s.EnablePublicIPv6
 }
 
 // +kubebuilder:object:root=true
