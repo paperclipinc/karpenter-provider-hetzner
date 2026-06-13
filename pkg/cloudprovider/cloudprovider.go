@@ -26,9 +26,10 @@ const providerName = "hetzner"
 
 // Drift reasons for HCloud-specific drift detection.
 const (
-	DriftImage    karpcp.DriftReason = "ImageDrift"
-	DriftNetwork  karpcp.DriftReason = "NetworkDrift"
-	DriftFirewall karpcp.DriftReason = "FirewallDrift"
+	DriftImage      karpcp.DriftReason = "ImageDrift"
+	DriftNetwork    karpcp.DriftReason = "NetworkDrift"
+	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
+	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -271,6 +272,33 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 			return DriftNetwork, nil
 		}
 	}
+
+	// Firewall drift: every NodeClass firewall must be attached to the server.
+	if len(nodeClass.Spec.FirewallIDs) > 0 {
+		attached := make(map[int64]bool, len(server.PublicNet.Firewalls))
+		for _, fw := range server.PublicNet.Firewalls {
+			if fw == nil {
+				continue
+			}
+			attached[fw.Firewall.ID] = true
+		}
+		for _, want := range nodeClass.Spec.FirewallIDs {
+			if !attached[want] {
+				return DriftFirewall, nil
+			}
+		}
+	}
+
+	// Server-type drift: the running server type must match the type recorded on
+	// the NodeClaim's instance-type label.
+	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
+		server.ServerType != nil && server.ServerType.Name != want {
+		return DriftServerType, nil
+	}
+
+	// SSH-key and user-data drift are intentionally not checked: Hetzner does not
+	// reliably expose applied SSH keys or user-data after create, so a comparison
+	// would produce false positives. They are omitted rather than faked.
 
 	return "", nil
 }
