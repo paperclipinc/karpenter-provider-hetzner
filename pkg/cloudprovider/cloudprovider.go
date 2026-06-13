@@ -11,10 +11,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
@@ -26,9 +26,10 @@ const providerName = "hetzner"
 
 // Drift reasons for HCloud-specific drift detection.
 const (
-	DriftImage    karpcp.DriftReason = "ImageDrift"
-	DriftNetwork  karpcp.DriftReason = "NetworkDrift"
-	DriftFirewall karpcp.DriftReason = "FirewallDrift"
+	DriftImage      karpcp.DriftReason = "ImageDrift"
+	DriftNetwork    karpcp.DriftReason = "NetworkDrift"
+	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
+	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -138,19 +139,24 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
-		Name:        nodeClaim.Name,
-		ServerType:  selected.Name,
-		Location:    location,
-		Image:       image,
-		NetworkID:   nodeClass.Spec.NetworkID,
-		FirewallIDs: nodeClass.Spec.FirewallIDs,
-		SSHKeyIDs:   nodeClass.Spec.SSHKeyIDs,
-		Labels:      nodeClass.Spec.Labels,
-		UserData:    nodeClass.Spec.UserData,
-		NodeClaim:   nodeClaim.Name,
-		NodePool:    nodePoolName,
+		Name:             nodeClaim.Name,
+		ServerType:       selected.Name,
+		Location:         location,
+		Image:            image,
+		NetworkID:        nodeClass.Spec.NetworkID,
+		FirewallIDs:      nodeClass.Spec.FirewallIDs,
+		SSHKeyIDs:        nodeClass.Spec.SSHKeyIDs,
+		Labels:           nodeClass.Spec.Labels,
+		UserData:         nodeClass.Spec.UserData,
+		NodeClaim:        nodeClaim.Name,
+		NodePool:         nodePoolName,
+		EnablePublicIPv4: nodeClass.Spec.PublicIPv4Enabled(),
+		EnablePublicIPv6: nodeClass.Spec.PublicIPv6Enabled(),
 	})
 	if err != nil {
+		if karpcp.IsInsufficientCapacityError(err) {
+			cp.typeProvider.MarkUnavailable(selected.Name, location)
+		}
 		return nil, fmt.Errorf("creating server: %w", err)
 	}
 
@@ -266,6 +272,37 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 			return DriftNetwork, nil
 		}
 	}
+
+	// Firewall drift: every NodeClass firewall must be attached to the server.
+	// This is a subset check only; firewalls attached beyond the NodeClass spec
+	// (e.g. applied out-of-band) are permitted and do not count as drift.
+	if len(nodeClass.Spec.FirewallIDs) > 0 {
+		attached := make(map[int64]bool, len(server.PublicNet.Firewalls))
+		for _, fw := range server.PublicNet.Firewalls {
+			if fw == nil {
+				continue
+			}
+			attached[fw.Firewall.ID] = true
+		}
+		for _, want := range nodeClass.Spec.FirewallIDs {
+			if !attached[want] {
+				return DriftFirewall, nil
+			}
+		}
+	}
+
+	// Server-type drift: the running server type must match the type recorded on
+	// the NodeClaim's instance-type label. An absent label (e.g. a NodeClaim not
+	// created by this provider) intentionally skips the check rather than
+	// reporting false drift.
+	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
+		server.ServerType != nil && server.ServerType.Name != want {
+		return DriftServerType, nil
+	}
+
+	// SSH-key and user-data drift are intentionally not checked: Hetzner does not
+	// reliably expose applied SSH keys or user-data after create, so a comparison
+	// would produce false positives. They are omitted rather than faked.
 
 	return "", nil
 }

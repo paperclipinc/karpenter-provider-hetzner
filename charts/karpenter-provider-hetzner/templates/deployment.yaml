@@ -1,3 +1,6 @@
+{{- if not .Values.clusterName }}
+{{- fail "clusterName is required: set --set clusterName=<your-cluster>" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,6 +31,29 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.auth.secretRef.name }}
                   key: {{ .Values.auth.secretRef.key }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
+            - name: HEALTH_PROBE_PORT
+              value: {{ .Values.healthProbe.port | quote }}
+          ports:
+            - name: http-metrics
+              containerPort: {{ .Values.metrics.port }}
+            - name: http-health
+              containerPort: {{ .Values.healthProbe.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http-health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

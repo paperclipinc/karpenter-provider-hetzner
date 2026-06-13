@@ -2,18 +2,37 @@ package instance
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 )
 
+// mockActionWaiter is a fake ActionWaiter for testing.
+type mockActionWaiter struct {
+	waited int
+	err    error
+}
+
+func (m *mockActionWaiter) WaitFor(_ context.Context, actions ...*hcloud.Action) error {
+	m.waited += len(actions)
+	return m.err
+}
+
 // mockServerClient is a fake ServerClient for testing.
 type mockServerClient struct {
-	servers map[int64]*hcloud.Server
-	nextID  int64
-	deleted []int64
+	servers          map[int64]*hcloud.Server
+	nextID           int64
+	deleted          []int64
+	lastListSelector string
+	action           *hcloud.Action
+	nextActions      []*hcloud.Action
+	createErr        error
+	lastOpts         hcloud.ServerCreateOpts
 }
 
 func newMockServerClient() *mockServerClient {
@@ -24,17 +43,15 @@ func newMockServerClient() *mockServerClient {
 }
 
 func (m *mockServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpts) (hcloud.ServerCreateResult, *hcloud.Response, error) {
+	m.lastOpts = opts
+	if m.createErr != nil {
+		return hcloud.ServerCreateResult{}, nil, m.createErr
+	}
 	id := m.nextID
 	m.nextID++
-	server := &hcloud.Server{
-		ID:         id,
-		Name:       opts.Name,
-		Labels:     opts.Labels,
-		ServerType: opts.ServerType,
-		Location:   opts.Location,
-	}
+	server := &hcloud.Server{ID: id, Name: opts.Name, Labels: opts.Labels, ServerType: opts.ServerType, Location: opts.Location}
 	m.servers[id] = server
-	return hcloud.ServerCreateResult{Server: server}, nil, nil
+	return hcloud.ServerCreateResult{Server: server, Action: m.action, NextActions: m.nextActions}, nil, nil
 }
 
 func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Server) (*hcloud.ServerDeleteResult, *hcloud.Response, error) {
@@ -51,7 +68,8 @@ func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server,
 	return server, nil, nil
 }
 
-func (m *mockServerClient) AllWithOpts(_ context.Context, _ hcloud.ServerListOpts) ([]*hcloud.Server, error) {
+func (m *mockServerClient) AllWithOpts(_ context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error) {
+	m.lastListSelector = opts.LabelSelector
 	result := make([]*hcloud.Server, 0, len(m.servers))
 	for _, s := range m.servers {
 		result = append(result, s)
@@ -61,7 +79,7 @@ func (m *mockServerClient) AllWithOpts(_ context.Context, _ hcloud.ServerListOpt
 
 func TestCreate_LabelsApplied(t *testing.T) {
 	client := newMockServerClient()
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	server, err := p.Create(context.Background(), CreateOpts{
 		Name:       "test-node",
@@ -88,11 +106,14 @@ func TestCreate_LabelsApplied(t *testing.T) {
 	if server.Labels[v1alpha1.ServerLabelNodePool] != "my-pool" {
 		t.Errorf("expected nodepool label 'my-pool', got %q", server.Labels[v1alpha1.ServerLabelNodePool])
 	}
+	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
+		t.Errorf("missing cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
+	}
 }
 
 func TestCreate_CustomLabelsPreserved(t *testing.T) {
 	client := newMockServerClient()
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	server, err := p.Create(context.Background(), CreateOpts{
 		Name:       "test-node",
@@ -112,7 +133,7 @@ func TestCreate_CustomLabelsPreserved(t *testing.T) {
 func TestDelete_RemovesServer(t *testing.T) {
 	client := newMockServerClient()
 	client.servers[42] = &hcloud.Server{ID: 42, Name: "node-42"}
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	err := p.Delete(context.Background(), "hcloud://42")
 	if err != nil {
@@ -126,7 +147,7 @@ func TestDelete_RemovesServer(t *testing.T) {
 func TestDelete_Idempotent(t *testing.T) {
 	// Deleting a server that doesn't exist should not return an error.
 	client := newMockServerClient()
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	err := p.Delete(context.Background(), "hcloud://999")
 	if err != nil {
@@ -137,7 +158,7 @@ func TestDelete_Idempotent(t *testing.T) {
 func TestGet_Found(t *testing.T) {
 	client := newMockServerClient()
 	client.servers[77] = &hcloud.Server{ID: 77, Name: "my-node"}
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	server, err := p.Get(context.Background(), "hcloud://77")
 	if err != nil {
@@ -153,7 +174,7 @@ func TestGet_Found(t *testing.T) {
 
 func TestGet_NotFound(t *testing.T) {
 	client := newMockServerClient()
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	server, err := p.Get(context.Background(), "hcloud://999")
 	if err != nil {
@@ -168,7 +189,7 @@ func TestList(t *testing.T) {
 	client := newMockServerClient()
 	client.servers[1] = &hcloud.Server{ID: 1, Name: "node-1"}
 	client.servers[2] = &hcloud.Server{ID: 2, Name: "node-2"}
-	p := NewProvider(client)
+	p := NewProvider(client, "test-cluster")
 
 	servers, err := p.List(context.Background())
 	if err != nil {
@@ -230,5 +251,92 @@ func TestFormatProviderID(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("FormatProviderID(%d) = %q, want %q", tc.id, got, tc.expected)
 		}
+	}
+}
+
+func TestCreate_ClusterLabelApplied(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client, "test-cluster")
+	server, err := p.Create(context.Background(), CreateOpts{
+		Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
+		t.Errorf("expected cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
+	}
+}
+
+func TestList_ScopesByCluster(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client, "test-cluster")
+	if _, err := p.List(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelCluster+"=test-cluster") {
+		t.Errorf("List selector %q does not scope by cluster", client.lastListSelector)
+	}
+	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelManagedBy+"="+v1alpha1.ServerValueManagedBy) {
+		t.Errorf("List selector %q missing managed-by", client.lastListSelector)
+	}
+}
+
+func TestCreate_WaitsForActionsAndSetsPublicNet(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1},
+		EnablePublicIPv4: false, EnablePublicIPv6: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if waiter.waited == 0 {
+		t.Error("expected the action waiter to be called")
+	}
+	if client.lastOpts.PublicNet == nil || client.lastOpts.PublicNet.EnableIPv4 {
+		t.Error("expected public IPv4 to be disabled in create opts")
+	}
+	if !client.lastOpts.PublicNet.EnableIPv6 {
+		t.Error("expected public IPv6 to default to enabled")
+	}
+}
+
+func TestCreate_MapsCapacityError(t *testing.T) {
+	client := newMockServerClient()
+	client.createErr = hcloud.Error{Code: hcloud.ErrorCodeResourceUnavailable}
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
+	if !karpcp.IsInsufficientCapacityError(err) {
+		t.Errorf("expected InsufficientCapacityError, got %v", err)
+	}
+}
+
+func TestCreate_WaiterErrorIsWrapped(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{err: fmt.Errorf("action failed")}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
+	if err == nil || !strings.Contains(err.Error(), "waiting for server") {
+		t.Errorf("expected wrapped wait error, got %v", err)
+	}
+}
+
+func TestCreate_WaitsForNextActions(t *testing.T) {
+	client := newMockServerClient()
+	client.action = nil
+	client.nextActions = []*hcloud.Action{{ID: 2}, {ID: 3}}
+	waiter := &mockActionWaiter{}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	if _, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if waiter.waited != 2 {
+		t.Errorf("expected 2 next-actions waited, got %d", waiter.waited)
 	}
 }

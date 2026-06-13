@@ -35,11 +35,11 @@ func makeServerType(name string, arch hcloud.Architecture, cpuType hcloud.CPUTyp
 var testPricings = []hcloud.ServerTypeLocationPricing{
 	{
 		Location: &hcloud.Location{Name: "nbg1"},
-		Monthly:  hcloud.Price{Gross: "7.3000000000"},
+		Monthly:  hcloud.Price{Net: "7.3000000000"},
 	},
 	{
 		Location: &hcloud.Location{Name: "fsn1"},
-		Monthly:  hcloud.Price{Gross: "7.3000000000"},
+		Monthly:  hcloud.Price{Net: "7.3000000000"},
 	},
 }
 
@@ -159,19 +159,17 @@ func TestServerFamily(t *testing.T) {
 	}
 }
 
-func TestMonthlyToHourly(t *testing.T) {
-	// 730 * 0.01 = 7.30
-	price := monthlyToHourly("7.3000000000")
-	expected := 7.3 / 730
-	if abs(price-expected) > 1e-9 {
-		t.Errorf("monthlyToHourly(7.30) = %v, want %v", price, expected)
+func TestHourlyNetPrice(t *testing.T) {
+	// Prefer hourly net; fall back to monthly net / 730.
+	if got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{
+		Hourly:  hcloud.Price{Net: "0.0100"},
+		Monthly: hcloud.Price{Net: "7.3000"},
+	}); got != 0.01 {
+		t.Errorf("want 0.01 from hourly net, got %v", got)
 	}
-}
-
-func TestMonthlyToHourly_Invalid(t *testing.T) {
-	price := monthlyToHourly("not-a-number")
-	if price != 0 {
-		t.Errorf("expected 0 for invalid input, got %v", price)
+	got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{Monthly: hcloud.Price{Net: "7.3000"}})
+	if got < 0.0099 || got > 0.0101 {
+		t.Errorf("want ~0.01 from monthly net/730, got %v", got)
 	}
 }
 
@@ -188,9 +186,58 @@ func TestList_CacheHit(t *testing.T) {
 	}
 }
 
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
+func TestList_ReflectsUnavailable(t *testing.T) {
+	st := makeServerType("cx11", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 1, 2, 20, testPricings)
+	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
+	p := NewProvider(client)
+
+	// Before marking: both offerings (nbg1, fsn1) must be available.
+	before, err := p.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	return x
+	if len(before) != 1 {
+		t.Fatalf("expected 1 instance type, got %d", len(before))
+	}
+	for _, o := range before[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		if !o.Available {
+			t.Errorf("before mark: offering %s should be available", zone)
+		}
+	}
+
+	// Mark cx11/nbg1 unavailable.
+	p.MarkUnavailable("cx11", "nbg1")
+
+	// After marking: nbg1 offering must be unavailable, fsn1 must remain available.
+	after, err := p.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("expected 1 instance type after mark, got %d", len(after))
+	}
+	for _, o := range after[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		switch zone {
+		case "nbg1":
+			if o.Available {
+				t.Errorf("offering nbg1 should be unavailable after MarkUnavailable")
+			}
+		case "fsn1":
+			if !o.Available {
+				t.Errorf("offering fsn1 should still be available (different location)")
+			}
+		default:
+			t.Errorf("unexpected zone %q in offerings", zone)
+		}
+	}
+
+	// Verify the original cached structs are NOT mutated (defensive copy check).
+	for _, o := range before[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		if zone == "nbg1" && !o.Available {
+			t.Error("cached struct was mutated: original nbg1 offering Available should still be true")
+		}
+	}
 }

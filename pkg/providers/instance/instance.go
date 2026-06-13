@@ -19,29 +19,46 @@ type ServerClient interface {
 	AllWithOpts(ctx context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error)
 }
 
-// Provider wraps hcloud server CRUD operations for Karpenter.
-type Provider struct {
-	client ServerClient
+// ActionWaiter waits for hcloud actions to complete. *hcloud.ActionClient satisfies it.
+type ActionWaiter interface {
+	WaitFor(ctx context.Context, actions ...*hcloud.Action) error
 }
 
-// NewProvider creates a new instance provider.
-func NewProvider(client ServerClient) *Provider {
-	return &Provider{client: client}
+// Provider wraps hcloud server CRUD operations for Karpenter.
+type Provider struct {
+	client      ServerClient
+	waiter      ActionWaiter
+	clusterName string
+}
+
+// NewProvider returns a Provider that does NOT wait for hcloud actions to
+// complete after server creation. Use it only in tests that do not exercise
+// action waiting; production code should use NewProviderWithWaiter.
+func NewProvider(client ServerClient, clusterName string) *Provider {
+	return &Provider{client: client, clusterName: clusterName}
+}
+
+// NewProviderWithWaiter returns a Provider that blocks after server creation
+// until all hcloud create actions complete. Use this in production.
+func NewProviderWithWaiter(client ServerClient, clusterName string, waiter ActionWaiter) *Provider {
+	return &Provider{client: client, waiter: waiter, clusterName: clusterName}
 }
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
 type CreateOpts struct {
-	Name        string
-	ServerType  string
-	Location    string
-	Image       *hcloud.Image
-	NetworkID   int64
-	FirewallIDs []int64
-	SSHKeyIDs   []int64
-	Labels      map[string]string
-	UserData    string
-	NodeClaim   string
-	NodePool    string
+	Name             string
+	ServerType       string
+	Location         string
+	Image            *hcloud.Image
+	NetworkID        int64
+	FirewallIDs      []int64
+	SSHKeyIDs        []int64
+	Labels           map[string]string
+	UserData         string
+	NodeClaim        string
+	NodePool         string
+	EnablePublicIPv4 bool
+	EnablePublicIPv6 bool
 }
 
 // Create provisions a new Hetzner server, merging Karpenter management labels.
@@ -51,6 +68,7 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		labels[k] = v
 	}
 	labels[v1alpha1.ServerLabelManagedBy] = v1alpha1.ServerValueManagedBy
+	labels[v1alpha1.ServerLabelCluster] = p.clusterName
 	if opts.NodeClaim != "" {
 		labels[v1alpha1.ServerLabelNodeClaim] = opts.NodeClaim
 	}
@@ -90,9 +108,29 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		UserData:   opts.UserData,
 	}
 
+	createOpts.PublicNet = &hcloud.ServerCreatePublicNet{
+		EnableIPv4: opts.EnablePublicIPv4,
+		EnableIPv6: opts.EnablePublicIPv6,
+	}
+
 	result, _, err := p.client.Create(ctx, createOpts)
 	if err != nil {
-		return nil, fmt.Errorf("creating server %q: %w", opts.Name, err)
+		return nil, MapCreateError(err)
+	}
+
+	// Wait for the create action and any follow-up actions so we only return a
+	// server that is actually being provisioned.
+	if p.waiter != nil {
+		actions := make([]*hcloud.Action, 0, 1+len(result.NextActions))
+		if result.Action != nil {
+			actions = append(actions, result.Action)
+		}
+		actions = append(actions, result.NextActions...)
+		if len(actions) > 0 {
+			if err := p.waiter.WaitFor(ctx, actions...); err != nil {
+				return nil, fmt.Errorf("waiting for server %q create actions: %w", opts.Name, err)
+			}
+		}
 	}
 	return result.Server, nil
 }
@@ -148,7 +186,9 @@ func (p *Provider) Get(ctx context.Context, providerID string) (*hcloud.Server, 
 func (p *Provider) List(ctx context.Context) ([]*hcloud.Server, error) {
 	opts := hcloud.ServerListOpts{
 		ListOpts: hcloud.ListOpts{
-			LabelSelector: v1alpha1.ServerLabelManagedBy + "=" + v1alpha1.ServerValueManagedBy,
+			LabelSelector: fmt.Sprintf("%s=%s,%s=%s",
+				v1alpha1.ServerLabelManagedBy, v1alpha1.ServerValueManagedBy,
+				v1alpha1.ServerLabelCluster, p.clusterName),
 		},
 	}
 	servers, err := p.client.AllWithOpts(ctx, opts)

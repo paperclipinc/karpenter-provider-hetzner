@@ -15,6 +15,7 @@ import (
 	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"
 	hetznerop "github.com/paperclipinc/karpenter-provider-hetzner/pkg/operator"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
@@ -31,8 +32,14 @@ func main() {
 		return
 	}
 
+	cfg, err := hetznerop.LoadConfig()
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to load config")
+		return
+	}
+
 	// Create the three providers.
-	instanceProvider := instance.NewProvider(&hcloudClient.Server)
+	instanceProvider := instance.NewProviderWithWaiter(&hcloudClient.Server, cfg.ClusterName, &hcloudClient.Action)
 	typeProvider := instancetype.NewProvider(&hcloudClient.ServerType)
 	imageProvider := imagefamily.NewProvider(&hcloudClient.Image)
 
@@ -50,16 +57,22 @@ func main() {
 	// Create cluster state.
 	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 
+	// Our NodeClass status controller (network + image validation, Ready).
+	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, &hcloudClient.Firewall, &hcloudClient.SSHKey, imageProvider)
+
 	// Wire and start all controllers.
-	op.WithControllers(ctx, controllers.NewControllers(
-		ctx,
-		op.Manager,
-		op.Clock,
-		op.GetClient(),
-		op.EventRecorder,
-		cloudProvider,
-		baseCloudProvider,
-		clusterState,
-		op.InstanceTypeStore,
+	op.WithControllers(ctx, append(
+		controllers.NewControllers(
+			ctx,
+			op.Manager,
+			op.Clock,
+			op.GetClient(),
+			op.EventRecorder,
+			cloudProvider,
+			baseCloudProvider,
+			clusterState,
+			op.InstanceTypeStore,
+		),
+		nodeClassController,
 	)...).Start(ctx)
 }
