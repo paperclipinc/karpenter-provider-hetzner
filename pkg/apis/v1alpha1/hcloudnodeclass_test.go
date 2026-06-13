@@ -22,4 +22,10 @@ func TestPublicIPDefaultsHelper(t *testing.T) {
 	if nc.Spec.PublicIPv4Enabled() {
 		t.Error("explicit false should disable public IPv4")
 	}
+
+	on := true
+	nc.Spec.EnablePublicIPv4 = &on
+	if !nc.Spec.PublicIPv4Enabled() {
+		t.Error("explicit true should enable public IPv4")
+	}
 }

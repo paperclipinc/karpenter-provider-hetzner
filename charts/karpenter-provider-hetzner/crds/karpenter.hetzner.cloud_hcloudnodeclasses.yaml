@@ -46,15 +46,17 @@ spec:
           spec:
             properties:
               enablePublicIPv4:
+                default: true
                 description: |-
                   EnablePublicIPv4 controls whether created servers get a public IPv4.
                   Defaults to true (Hetzner's default). Set false on private-network
                   clusters to avoid the primary-IPv4 charge.
                 type: boolean
               enablePublicIPv6:
+                default: true
                 description: |-
                   EnablePublicIPv6 controls whether created servers get a public IPv6.
-                  Defaults to true.
+                  Defaults to true. Set false to drop the public IPv6 as well.
                 type: boolean
               firewallIDs:
                 items:

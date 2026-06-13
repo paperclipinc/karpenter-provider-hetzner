@@ -51,11 +51,13 @@ type HCloudNodeClassSpec struct {
 	// EnablePublicIPv4 controls whether created servers get a public IPv4.
 	// Defaults to true (Hetzner's default). Set false on private-network
 	// clusters to avoid the primary-IPv4 charge.
+	// +kubebuilder:default=true
 	// +optional
 	EnablePublicIPv4 *bool `json:"enablePublicIPv4,omitempty"`
 
 	// EnablePublicIPv6 controls whether created servers get a public IPv6.
-	// Defaults to true.
+	// Defaults to true. Set false to drop the public IPv6 as well.
+	// +kubebuilder:default=true
 	// +optional
 	EnablePublicIPv6 *bool `json:"enablePublicIPv6,omitempty"`
 }
