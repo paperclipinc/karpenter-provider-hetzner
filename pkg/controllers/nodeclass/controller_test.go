@@ -259,8 +259,8 @@ func TestReconcile_UserDataSecretMissing(t *testing.T) {
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsTrue() {
-		t.Error("UserDataReady should not be true when the secret is missing")
+	if !got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsFalse() {
+		t.Error("UserDataReady should be false when the secret is missing")
 	}
 	if got.StatusConditions().Root().IsTrue() {
 		t.Error("Ready should not be true when UserDataReady is false")

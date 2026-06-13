@@ -5,7 +5,7 @@ import "testing"
 func TestStatusConditionsIncludeDependents(t *testing.T) {
 	nc := &HCloudNodeClass{}
 	cs := nc.StatusConditions()
-	for _, ct := range []string{ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady} {
+	for _, ct := range []string{ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady, ConditionTypeUserDataReady} {
 		if cs.Get(ct) == nil {
 			t.Errorf("expected condition %q to be registered", ct)
 		}
