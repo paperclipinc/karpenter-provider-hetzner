@@ -374,3 +374,51 @@ func TestGetInstanceTypes_NilNodePool(t *testing.T) {
 		t.Error("expected at least one instance type")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Edge-case tests
+// ---------------------------------------------------------------------------
+
+// TestDelete_Idempotent verifies that deleting a NodeClaim whose backing server
+// no longer exists (or never did) is a no-op and returns nil.
+func TestDelete_Idempotent(t *testing.T) {
+	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	nodeClaim := &karpv1.NodeClaim{}
+	nodeClaim.Status.ProviderID = instance.FormatProviderID(12345) // not seeded
+	if err := cp.Delete(context.Background(), nodeClaim); err != nil {
+		t.Errorf("Delete of missing server should be nil, got %v", err)
+	}
+}
+
+// TestGet_NilServerType verifies Get does not panic when the live server has a
+// nil ServerType (e.g. mid-provisioning); capacity may be empty in that case.
+func TestGet_NilServerType(t *testing.T) {
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	fsc.servers[88] = &hcloud.Server{ID: 88} // ServerType nil (e.g. mid-provisioning)
+	nc, err := cp.Get(context.Background(), instance.FormatProviderID(88))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if nc.Status.ProviderID != instance.FormatProviderID(88) {
+		t.Errorf("expected provider ID set, got %q", nc.Status.ProviderID)
+	}
+	// Capacity may be empty when ServerType is nil; the call must not panic.
+}
+
+// TestCreate_NoCompatibleType verifies Create returns an InsufficientCapacityError
+// when no instance type satisfies the NodeClaim requirements (selected == nil).
+func TestCreate_NoCompatibleType(t *testing.T) {
+	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	nodeClaim := createNodeClaim()
+	nodeClaim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelInstanceTypeStable,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"does-not-exist"},
+		},
+	}
+	_, err := cp.Create(context.Background(), nodeClaim)
+	if !karpcp.IsInsufficientCapacityError(err) {
+		t.Errorf("expected InsufficientCapacityError when no type matches, got %v", err)
+	}
+}
