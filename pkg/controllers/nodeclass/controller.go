@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -72,6 +75,15 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeResourcesReady, reason, msg)
 	}
 
+	// Validate the userData secret ref (if set).
+	if reason, msg, unknown, ok := c.validateUserData(ctx, nc); ok {
+		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeUserDataReady)
+	} else if unknown {
+		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+	} else {
+		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+	}
+
 	// Image resolution for both architectures.
 	resolved, ierr := c.resolveImages(ctx, nc)
 	if ierr != nil {
@@ -111,6 +123,27 @@ func (c *Controller) validateResources(ctx context.Context, nc *v1alpha1.HCloudN
 		if key == nil {
 			return "SSHKeyNotFound", fmt.Sprintf("ssh key %d does not exist", id), false, false
 		}
+	}
+	return "", "", false, true
+}
+
+// validateUserData checks that the referenced userData Secret and key exist and
+// are non-empty. Returns ok=true when there is nothing to validate or it
+// resolves successfully; unknown=true on a transient API error.
+func (c *Controller) validateUserData(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
+	ref := nc.Spec.UserDataSecretRef
+	if ref == nil {
+		return "", "", false, true
+	}
+	secret := &corev1.Secret{}
+	if err := c.kubeClient.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "UserDataSecretNotFound", fmt.Sprintf("secret %s/%s not found", ref.Namespace, ref.Name), false, false
+		}
+		return "UserDataCheckFailed", err.Error(), true, false
+	}
+	if v, present := secret.Data[ref.Key]; !present || len(v) == 0 {
+		return "UserDataKeyMissing", fmt.Sprintf("secret %s/%s has no non-empty key %q", ref.Namespace, ref.Name, ref.Key), false, false
 	}
 	return "", "", false, true
 }
