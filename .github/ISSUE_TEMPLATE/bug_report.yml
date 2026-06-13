@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a problem with the provider
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Please do not include secrets (tokens, kubeconfigs) in logs.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: NodePool/HCloudNodeClass YAML and the sequence that triggers it.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Controller logs
+      description: Relevant controller logs (redact secrets).
+      render: shell
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider version / image tag
+    validations:
+      required: true
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes & Karpenter version
+    validations:
+      required: true
