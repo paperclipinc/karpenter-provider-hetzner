@@ -88,7 +88,7 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 		if p.Location == nil {
 			continue
 		}
-		price := monthlyToHourly(p.Monthly.Gross)
+		price := hourlyNetPrice(p)
 		offerings = append(offerings, &cloudprovider.Offering{
 			Requirements: scheduling.NewRequirements(
 				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
@@ -147,15 +147,20 @@ func serverFamily(name string) string {
 	return name
 }
 
-// monthlyToHourly converts a monthly gross price string (e.g. "4.9000000000") to an hourly float64.
-// Uses 730 hours/month.
-func monthlyToHourly(grossStr string) float64 {
-	grossStr = strings.TrimSpace(grossStr)
-	v, err := strconv.ParseFloat(grossStr, 64)
-	if err != nil {
-		return 0
+// Pricing here is the server-type base net price and intentionally excludes the
+// primary-IPv4 surcharge: the catalog is NodeClass-agnostic. Cost-sensitive
+// clusters drop the IPv4 charge with HCloudNodeClass.spec.enablePublicIPv4=false.
+//
+// hourlyNetPrice returns the net hourly price for a server-type pricing entry,
+// preferring the explicit hourly figure and falling back to monthly/730.
+func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Hourly.Net), 64); err == nil && v > 0 {
+		return v
 	}
-	return v / 730
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Monthly.Net), 64); err == nil {
+		return v / 730
+	}
+	return 0
 }
 
 // filterByLocations returns only the instance types that have at least one offering in the requested locations.

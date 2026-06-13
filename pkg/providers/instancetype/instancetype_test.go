@@ -159,19 +159,17 @@ func TestServerFamily(t *testing.T) {
 	}
 }
 
-func TestMonthlyToHourly(t *testing.T) {
-	// 730 * 0.01 = 7.30
-	price := monthlyToHourly("7.3000000000")
-	expected := 7.3 / 730
-	if abs(price-expected) > 1e-9 {
-		t.Errorf("monthlyToHourly(7.30) = %v, want %v", price, expected)
+func TestHourlyNetPrice(t *testing.T) {
+	// Prefer hourly net; fall back to monthly net / 730.
+	if got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{
+		Hourly:  hcloud.Price{Net: "0.0100"},
+		Monthly: hcloud.Price{Net: "7.3000"},
+	}); got != 0.01 {
+		t.Errorf("want 0.01 from hourly net, got %v", got)
 	}
-}
-
-func TestMonthlyToHourly_Invalid(t *testing.T) {
-	price := monthlyToHourly("not-a-number")
-	if price != 0 {
-		t.Errorf("expected 0 for invalid input, got %v", price)
+	got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{Monthly: hcloud.Price{Net: "7.3000"}})
+	if got < 0.0099 || got > 0.0101 {
+		t.Errorf("want ~0.01 from monthly net/730, got %v", got)
 	}
 }
 
