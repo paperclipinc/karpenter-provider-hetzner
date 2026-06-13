@@ -1,15 +1,15 @@
 module github.com/paperclipinc/karpenter-provider-hetzner
 
-go 1.26.2
+go 1.26.4
 
 require (
-	github.com/awslabs/operatorpkg v0.0.0-20251222193911-34e9a1898737
-	github.com/hetznercloud/hcloud-go/v2 v2.41.2
-	k8s.io/api v0.36.0
-	k8s.io/apimachinery v0.36.0
-	k8s.io/client-go v0.36.0
+	github.com/awslabs/operatorpkg v0.0.0-20260501204335-c49b4ca8d58d
+	github.com/hetznercloud/hcloud-go/v2 v2.43.0
+	k8s.io/api v0.36.2
+	k8s.io/apimachinery v0.36.2
+	k8s.io/client-go v0.36.2
 	sigs.k8s.io/controller-runtime v0.24.1
-	sigs.k8s.io/karpenter v1.12.0
+	sigs.k8s.io/karpenter v1.13.0
 )
 
 require (
@@ -56,7 +56,7 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.1 // indirect
+	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.55.0 // indirect
