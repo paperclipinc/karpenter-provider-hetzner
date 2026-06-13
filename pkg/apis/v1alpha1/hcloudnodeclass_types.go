@@ -93,8 +93,8 @@ func (in *HCloudNodeClass) SetConditions(conditions []status.Condition) {
 	in.Status.Conditions = conditions
 }
 
-func (in *HCloudNodeClass) StatusConditions() status.ConditionSet {
-	return conditionTypes.For(in)
+func (in *HCloudNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
+	return conditionTypes.For(in, opts...)
 }
 
 // PublicIPv4Enabled reports whether public IPv4 should be enabled (default true).
