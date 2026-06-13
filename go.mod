@@ -1,12 +1,13 @@
 module github.com/paperclipinc/karpenter-provider-hetzner
 
-go 1.26.3
+go 1.26.2
 
 require (
 	github.com/awslabs/operatorpkg v0.0.0-20251222193911-34e9a1898737
 	github.com/hetznercloud/hcloud-go/v2 v2.41.2
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
+	k8s.io/client-go v0.36.0
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/karpenter v1.12.0
 )
@@ -70,7 +71,6 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/apiextensions-apiserver v0.36.0 // indirect
-	k8s.io/client-go v0.36.0 // indirect
 	k8s.io/cloud-provider v0.35.0 // indirect
 	k8s.io/component-base v0.36.0 // indirect
 	k8s.io/component-helpers v0.35.0 // indirect
