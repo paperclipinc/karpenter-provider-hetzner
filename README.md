@@ -82,7 +82,7 @@ spec:
   sshKeyIDs: [42]                  # optional
   placementGroupStrategy: spread   # spread | none (default spread)
   enablePublicIPv4: false          # default true; false saves the primary-IPv4 charge
-  userData: |                      # cloud-init / Talos machine config
+  userData: |                      # cloud-init / Talos machine config (or use userDataSecretRef to source from a Secret)
     ...
 ---
 apiVersion: karpenter.sh/v1
@@ -135,6 +135,7 @@ Provisioned nodes carry, in addition to the well-known Karpenter labels:
 | `enablePublicIPv6` | `bool` | no | `true` | Attach a public IPv6 |
 | `labels` | `map[string]string` | no | — | Extra labels on the Hetzner server |
 | `userData` | `string` | no | — | cloud-init / Talos machine config |
+| `userDataSecretRef` | `object {namespace, name, key}` | no | — | Source `userData` from a Secret (keeps secret bootstrap data out of git); takes precedence over `userData` |
 
 Status exposes `conditions` (`ImagesReady`, `NetworkReady`, `ResourcesReady`, aggregated into `Ready`) and `resolvedImages` (image ID per architecture).
 

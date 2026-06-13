@@ -59,9 +59,15 @@ type fakeServerClient struct {
 	servers   map[int64]*hcloud.Server
 	createErr error
 	nextID    int64
+	lastOpts  hcloud.ServerCreateOpts
+}
+
+func (f *fakeServerClient) lastUserData() string {
+	return f.lastOpts.UserData
 }
 
 func (f *fakeServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpts) (hcloud.ServerCreateResult, *hcloud.Response, error) {
+	f.lastOpts = opts
 	if f.createErr != nil {
 		return hcloud.ServerCreateResult{}, nil, f.createErr
 	}
@@ -420,5 +426,127 @@ func TestCreate_NoCompatibleType(t *testing.T) {
 	_, err := cp.Create(context.Background(), nodeClaim)
 	if !karpcp.IsInsufficientCapacityError(err) {
 		t.Errorf("expected InsufficientCapacityError when no type matches, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UserData secret resolution tests
+// ---------------------------------------------------------------------------
+
+// TestCreate_UserDataFromSecret verifies that when UserDataSecretRef is set, the
+// userData passed to the server-create call comes from the referenced Secret, NOT
+// from the inline UserData field.
+func TestCreate_UserDataFromSecret(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserData = "inline-should-be-ignored"
+	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+		Namespace: "kube-system",
+		Name:      "talos",
+		Key:       "userData",
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "talos", Namespace: "kube-system"},
+		Data:       map[string][]byte{"userData": []byte("machine:\n  type: worker\n")},
+	}
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastUserData(); got != "machine:\n  type: worker\n" {
+		t.Errorf("expected userData from secret, got %q", got)
+	}
+}
+
+// TestCreate_UserDataInlineWhenNoRef verifies that when UserDataSecretRef is nil,
+// the inline UserData field is passed through to the server-create call unchanged.
+func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserData = "cloud-init-inline"
+	// UserDataSecretRef is intentionally left nil.
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastUserData(); got != "cloud-init-inline" {
+		t.Errorf("expected inline userData %q, got %q", "cloud-init-inline", got)
+	}
+}
+
+// TestCreate_UserDataSecretKeyMissing verifies that Create returns an error when
+// UserDataSecretRef points to a Secret that exists but does not contain the
+// referenced key (key absent == invalid, same as secret missing).
+func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+		Namespace: "kube-system",
+		Name:      "talos",
+		Key:       "userData",
+	}
+	// Secret exists but contains a different key — "userData" is absent.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "talos", Namespace: "kube-system"},
+		Data:       map[string][]byte{"other": []byte("x")},
+	}
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected error when secret exists but referenced key is absent, got nil")
+	}
+}
+
+// TestCreate_UserDataSecretMissing verifies that Create returns an error when
+// UserDataSecretRef points to a Secret that does not exist in the cluster.
+func TestCreate_UserDataSecretMissing(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+		Namespace: "kube-system",
+		Name:      "does-not-exist",
+		Key:       "userData",
+	}
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	// Secret is intentionally NOT added to the fake client.
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected error when userDataSecretRef points to a missing Secret, got nil")
 	}
 }

@@ -137,6 +137,12 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	// Collect node pool name from NodeClaim labels (may be empty).
 	nodePoolName := nodeClaim.Labels[karpv1.NodePoolLabelKey]
 
+	// Resolve userData, preferring the Secret reference over inline userData.
+	userData, err := cp.resolveUserData(ctx, nodeClass)
+	if err != nil {
+		return nil, fmt.Errorf("resolving userData: %w", err)
+	}
+
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
 		Name:             nodeClaim.Name,
@@ -147,7 +153,7 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		FirewallIDs:      nodeClass.Spec.FirewallIDs,
 		SSHKeyIDs:        nodeClass.Spec.SSHKeyIDs,
 		Labels:           nodeClass.Spec.Labels,
-		UserData:         nodeClass.Spec.UserData,
+		UserData:         userData,
 		NodeClaim:        nodeClaim.Name,
 		NodePool:         nodePoolName,
 		EnablePublicIPv4: nodeClass.Spec.PublicIPv4Enabled(),
@@ -305,6 +311,24 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	// would produce false positives. They are omitted rather than faked.
 
 	return "", nil
+}
+
+// resolveUserData returns the userData for a NodeClass, reading it from the
+// referenced Secret when UserDataSecretRef is set (takes precedence over inline UserData).
+func (cp *CloudProvider) resolveUserData(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (string, error) {
+	ref := nc.Spec.UserDataSecretRef
+	if ref == nil {
+		return nc.Spec.UserData, nil
+	}
+	secret := &corev1.Secret{}
+	if err := cp.kubeClient.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, secret); err != nil {
+		return "", fmt.Errorf("reading userData secret %s/%s: %w", ref.Namespace, ref.Name, err)
+	}
+	data, ok := secret.Data[ref.Key]
+	if !ok || len(data) == 0 {
+		return "", fmt.Errorf("userData secret %s/%s has no non-empty key %q", ref.Namespace, ref.Name, ref.Key)
+	}
+	return string(data), nil
 }
 
 // resolveNodeClass fetches the HCloudNodeClass referenced by ref.
