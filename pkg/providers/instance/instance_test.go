@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -11,9 +12,10 @@ import (
 
 // mockServerClient is a fake ServerClient for testing.
 type mockServerClient struct {
-	servers map[int64]*hcloud.Server
-	nextID  int64
-	deleted []int64
+	servers          map[int64]*hcloud.Server
+	nextID           int64
+	deleted          []int64
+	lastListSelector string
 }
 
 func newMockServerClient() *mockServerClient {
@@ -51,7 +53,8 @@ func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server,
 	return server, nil, nil
 }
 
-func (m *mockServerClient) AllWithOpts(_ context.Context, _ hcloud.ServerListOpts) ([]*hcloud.Server, error) {
+func (m *mockServerClient) AllWithOpts(_ context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error) {
+	m.lastListSelector = opts.ListOpts.LabelSelector
 	result := make([]*hcloud.Server, 0, len(m.servers))
 	for _, s := range m.servers {
 		result = append(result, s)
@@ -87,6 +90,9 @@ func TestCreate_LabelsApplied(t *testing.T) {
 	}
 	if server.Labels[v1alpha1.ServerLabelNodePool] != "my-pool" {
 		t.Errorf("expected nodepool label 'my-pool', got %q", server.Labels[v1alpha1.ServerLabelNodePool])
+	}
+	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
+		t.Errorf("missing cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
 	}
 }
 
@@ -244,5 +250,19 @@ func TestCreate_ClusterLabelApplied(t *testing.T) {
 	}
 	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
 		t.Errorf("expected cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
+	}
+}
+
+func TestList_ScopesByCluster(t *testing.T) {
+	client := newMockServerClient()
+	p := NewProvider(client, "test-cluster")
+	if _, err := p.List(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelCluster+"=test-cluster") {
+		t.Errorf("List selector %q does not scope by cluster", client.lastListSelector)
+	}
+	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelManagedBy+"="+v1alpha1.ServerValueManagedBy) {
+		t.Errorf("List selector %q missing managed-by", client.lastListSelector)
 	}
 }

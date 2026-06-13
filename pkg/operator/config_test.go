@@ -19,3 +19,12 @@ func TestLoadConfig_ReadsClusterName(t *testing.T) {
 		t.Errorf("got cluster name %q, want paperclip-prod", cfg.ClusterName)
 	}
 }
+
+func TestLoadConfig_RejectsInvalidClusterName(t *testing.T) {
+	for _, bad := range []string{"has space", "slash/name", "comma,name", "töö"} {
+		t.Setenv("CLUSTER_NAME", bad)
+		if _, err := LoadConfig(); err == nil {
+			t.Errorf("expected error for invalid cluster name %q", bad)
+		}
+	}
+}
