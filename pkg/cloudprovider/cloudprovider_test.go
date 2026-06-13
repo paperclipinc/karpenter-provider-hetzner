@@ -492,6 +492,38 @@ func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
 	}
 }
 
+// TestCreate_UserDataSecretKeyMissing verifies that Create returns an error when
+// UserDataSecretRef points to a Secret that exists but does not contain the
+// referenced key (key absent == invalid, same as secret missing).
+func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+		Namespace: "kube-system",
+		Name:      "talos",
+		Key:       "userData",
+	}
+	// Secret exists but contains a different key — "userData" is absent.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "talos", Namespace: "kube-system"},
+		Data:       map[string][]byte{"other": []byte("x")},
+	}
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected error when secret exists but referenced key is absent, got nil")
+	}
+}
+
 // TestCreate_UserDataSecretMissing verifies that Create returns an error when
 // UserDataSecretRef points to a Secret that does not exist in the cluster.
 func TestCreate_UserDataSecretMissing(t *testing.T) {

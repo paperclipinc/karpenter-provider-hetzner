@@ -236,6 +236,45 @@ func TestReconcile_UserDataSecretValid(t *testing.T) {
 	}
 }
 
+// TestReconcile_UserDataKeyMissing verifies that Reconcile sets UserDataReady=False
+// (reason UserDataKeyMissing) when the Secret exists but does not contain the
+// referenced key. This is the "secret present, key absent" branch that differs from
+// the secret-missing case.
+func TestReconcile_UserDataKeyMissing(t *testing.T) {
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+		Namespace: "kube-system",
+		Name:      "talos",
+		Key:       "userData",
+	}
+	// Secret exists but has a different key — "userData" is absent.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "talos", Namespace: "kube-system"},
+		Data:       map[string][]byte{"wrong": []byte("x")},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc, secret).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := &v1alpha1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsFalse() {
+		t.Error("UserDataReady should be false when secret exists but referenced key is absent")
+	}
+	if got.StatusConditions().Root().IsTrue() {
+		t.Error("Ready should not be true when UserDataReady is false")
+	}
+}
+
 func TestReconcile_UserDataSecretMissing(t *testing.T) {
 	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
