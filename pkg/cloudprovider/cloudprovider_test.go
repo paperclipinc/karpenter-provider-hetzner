@@ -467,6 +467,31 @@ func TestCreate_UserDataFromSecret(t *testing.T) {
 	}
 }
 
+// TestCreate_UserDataInlineWhenNoRef verifies that when UserDataSecretRef is nil,
+// the inline UserData field is passed through to the server-create call unchanged.
+func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.UserData = "cloud-init-inline"
+	// UserDataSecretRef is intentionally left nil.
+
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(stc),
+		imagefamily.NewProvider(imgc))
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastUserData(); got != "cloud-init-inline" {
+		t.Errorf("expected inline userData %q, got %q", "cloud-init-inline", got)
+	}
+}
+
 // TestCreate_UserDataSecretMissing verifies that Create returns an error when
 // UserDataSecretRef points to a Secret that does not exist in the cluster.
 func TestCreate_UserDataSecretMissing(t *testing.T) {
