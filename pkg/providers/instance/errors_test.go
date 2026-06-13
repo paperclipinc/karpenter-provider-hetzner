@@ -19,6 +19,8 @@ func TestMapCreateError(t *testing.T) {
 		{"unavailable", hcloud.Error{Code: hcloud.ErrorCodeResourceUnavailable}, true, false},
 		{"resource-limit", hcloud.Error{Code: hcloud.ErrorCodeResourceLimitExceeded}, true, false},
 		{"rate-limit", hcloud.Error{Code: hcloud.ErrorCodeRateLimitExceeded}, false, false},
+		{"unsupported-location", hcloud.Error{Code: hcloud.ErrorCodeInvalidInput, Message: "unsupported location for server type"}, true, false},
+		{"other-invalid-input", hcloud.Error{Code: hcloud.ErrorCodeInvalidInput, Message: "server name is invalid"}, false, false},
 		{"other", errors.New("boom"), false, false},
 	}
 	for _, tc := range cases {
