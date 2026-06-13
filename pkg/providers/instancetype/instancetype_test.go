@@ -186,6 +186,62 @@ func TestList_CacheHit(t *testing.T) {
 	}
 }
 
+func TestList_ReflectsUnavailable(t *testing.T) {
+	st := makeServerType("cx11", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 1, 2, 20, testPricings)
+	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
+	p := NewProvider(client)
+
+	// Before marking: both offerings (nbg1, fsn1) must be available.
+	before, err := p.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("expected 1 instance type, got %d", len(before))
+	}
+	for _, o := range before[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		if !o.Available {
+			t.Errorf("before mark: offering %s should be available", zone)
+		}
+	}
+
+	// Mark cx11/nbg1 unavailable.
+	p.MarkUnavailable("cx11", "nbg1")
+
+	// After marking: nbg1 offering must be unavailable, fsn1 must remain available.
+	after, err := p.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("expected 1 instance type after mark, got %d", len(after))
+	}
+	for _, o := range after[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		switch zone {
+		case "nbg1":
+			if o.Available {
+				t.Errorf("offering nbg1 should be unavailable after MarkUnavailable")
+			}
+		case "fsn1":
+			if !o.Available {
+				t.Errorf("offering fsn1 should still be available (different location)")
+			}
+		default:
+			t.Errorf("unexpected zone %q in offerings", zone)
+		}
+	}
+
+	// Verify the original cached structs are NOT mutated (defensive copy check).
+	for _, o := range before[0].Offerings {
+		zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+		if zone == "nbg1" && !o.Available {
+			t.Error("cached struct was mutated: original nbg1 offering Available should still be true")
+		}
+	}
+}
+
 func abs(x float64) float64 {
 	if x < 0 {
 		return -x

@@ -153,6 +153,9 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		EnablePublicIPv6: nodeClass.Spec.PublicIPv6Enabled(),
 	})
 	if err != nil {
+		if karpcp.IsInsufficientCapacityError(err) {
+			cp.typeProvider.MarkUnavailable(selected.Name, location)
+		}
 		return nil, fmt.Errorf("creating server: %w", err)
 	}
 

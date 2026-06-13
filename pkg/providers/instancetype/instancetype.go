@@ -31,11 +31,13 @@ type Provider struct {
 	mu          sync.RWMutex
 	cachedTypes []*cloudprovider.InstanceType
 	cacheExpiry time.Time
+
+	unavailable *unavailableCache
 }
 
 // NewProvider creates a new instance type provider.
 func NewProvider(client ServerTypeClient) *Provider {
-	return &Provider{client: client}
+	return &Provider{client: client, unavailable: newUnavailableCache(5 * time.Minute)}
 }
 
 // List returns all available InstanceTypes, filtered to those with offerings in the given locations.
@@ -45,7 +47,7 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
 		cached := p.cachedTypes
 		p.mu.RUnlock()
-		return filterByLocations(cached, locations), nil
+		return p.applyAvailability(filterByLocations(cached, locations)), nil
 	}
 	p.mu.RUnlock()
 
@@ -54,7 +56,7 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 
 	// Double-check after acquiring write lock.
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
-		return filterByLocations(p.cachedTypes, locations), nil
+		return p.applyAvailability(filterByLocations(p.cachedTypes, locations)), nil
 	}
 
 	serverTypes, err := p.client.All(ctx)
@@ -70,7 +72,32 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 	p.cachedTypes = types
 	p.cacheExpiry = time.Now().Add(cacheTTL)
 
-	return filterByLocations(types, locations), nil
+	return p.applyAvailability(filterByLocations(types, locations)), nil
+}
+
+// MarkUnavailable records that a (serverType, location) offering failed with a
+// capacity error so it is reported unavailable for a TTL.
+func (p *Provider) MarkUnavailable(serverType, location string) {
+	p.unavailable.markUnavailable(serverType, location)
+}
+
+// applyAvailability returns copies of the given instance types with each
+// offering's Available flag computed live from the unavailable cache.
+func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
+	out := make([]*cloudprovider.InstanceType, len(types))
+	for i, it := range types {
+		offerings := make(cloudprovider.Offerings, len(it.Offerings))
+		for j, o := range it.Offerings {
+			zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
+			cp := *o
+			cp.Available = !p.unavailable.isUnavailable(it.Name, zone)
+			offerings[j] = &cp
+		}
+		nt := *it
+		nt.Offerings = offerings
+		out[i] = &nt
+	}
+	return out
 }
 
 // toInstanceType maps a Hetzner ServerType to a Karpenter InstanceType.
