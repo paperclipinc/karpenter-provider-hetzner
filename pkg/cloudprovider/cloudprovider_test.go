@@ -3,6 +3,7 @@ package cloudprovider_test
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -11,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
@@ -165,6 +167,55 @@ func baselineNodeClass() *v1alpha1.HCloudNodeClass {
 	}
 }
 
+// cx22Type returns a representative shared-vCPU x86 server type with a single
+// nbg1 offering, used by the Create/List/Get/GetInstanceTypes tests.
+func cx22Type() *hcloud.ServerType {
+	return &hcloud.ServerType{
+		Name:         "cx22",
+		Cores:        2,
+		Memory:       4,
+		Disk:         40,
+		Architecture: hcloud.ArchitectureX86,
+		CPUType:      hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{
+			{
+				Location: &hcloud.Location{Name: "nbg1"},
+				Hourly:   hcloud.Price{Net: "0.0070"},
+				Monthly:  hcloud.Price{Net: "4.5100"},
+			},
+		},
+	}
+}
+
+// buildCPWithTypes wires a CloudProvider with the given NodeClass and server types,
+// and returns the fakes so tests can inject errors / inspect state. Unlike buildCP
+// it does NOT pre-seed a backing server.
+func buildCPWithTypes(t *testing.T, nc *v1alpha1.HCloudNodeClass, types []*hcloud.ServerType) (
+	*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
+	t.Helper()
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	if nc.Name == "" {
+		nc.Name = "default"
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	stc := &fakeServerTypeClient{types: types}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	typeProvider := instancetype.NewProvider(stc)
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		typeProvider,
+		imagefamily.NewProvider(imgc))
+	return cp, fsc, typeProvider
+}
+
+// createNodeClaim returns a NodeClaim with empty requirements (compatible with any type).
+func createNodeClaim() *karpv1.NodeClaim {
+	nc := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim"}}
+	nc.Spec.NodeClassRef = &karpv1.NodeClassReference{Name: "default", Group: v1alpha1.Group, Kind: "HCloudNodeClass"}
+	return nc
+}
+
 // ---------------------------------------------------------------------------
 // Drift tests
 // ---------------------------------------------------------------------------
@@ -221,5 +272,105 @@ func TestIsDrifted_ServerType(t *testing.T) {
 	}
 	if reason != cloudprovider.DriftServerType {
 		t.Errorf("want ServerTypeDrift, got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Create / Delete / Get / List / GetInstanceTypes tests
+// ---------------------------------------------------------------------------
+
+func TestCreate_Success(t *testing.T) {
+	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	out, err := cp.Create(context.Background(), createNodeClaim())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if out.Status.ProviderID == "" || !strings.HasPrefix(out.Status.ProviderID, "hcloud://") {
+		t.Errorf("expected hcloud provider ID, got %q", out.Status.ProviderID)
+	}
+	if out.Status.Capacity.Cpu().IsZero() {
+		t.Error("expected non-zero CPU capacity")
+	}
+}
+
+func TestCreate_InsufficientCapacityMarksUnavailable(t *testing.T) {
+	cp, fsc, typeProvider := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	fsc.createErr = hcloud.Error{Code: hcloud.ErrorCodeResourceUnavailable}
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected error on capacity failure")
+	}
+	// The offering for (cx22, nbg1) should now be marked unavailable.
+	its, lerr := typeProvider.List(context.Background(), []string{"nbg1"})
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	for _, it := range its {
+		if it.Name != "cx22" {
+			continue
+		}
+		for _, o := range it.Offerings {
+			if o.Available {
+				t.Error("expected cx22/nbg1 offering to be unavailable after capacity error")
+			}
+		}
+	}
+}
+
+func TestGet_NotFound(t *testing.T) {
+	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	_, err := cp.Get(context.Background(), instance.FormatProviderID(999))
+	if !karpcp.IsNodeClaimNotFoundError(err) {
+		t.Errorf("expected NodeClaimNotFoundError, got %v", err)
+	}
+}
+
+func TestGet_Found(t *testing.T) {
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	fsc.servers[55] = &hcloud.Server{ID: 55, ServerType: &hcloud.ServerType{Name: "cx22"}}
+	nc, err := cp.Get(context.Background(), instance.FormatProviderID(55))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nc.Status.ProviderID != instance.FormatProviderID(55) {
+		t.Errorf("got provider ID %q", nc.Status.ProviderID)
+	}
+}
+
+func TestList_ReturnsManagedServers(t *testing.T) {
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	fsc.servers[1] = &hcloud.Server{ID: 1, ServerType: &hcloud.ServerType{Name: "cx22"}}
+	fsc.servers[2] = &hcloud.Server{ID: 2, ServerType: &hcloud.ServerType{Name: "cx22"}}
+	list, err := cp.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 nodeclaims, got %d", len(list))
+	}
+}
+
+func TestDelete_RemovesServer(t *testing.T) {
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	fsc.servers[77] = &hcloud.Server{ID: 77}
+	nodeClaim := &karpv1.NodeClaim{}
+	nodeClaim.Status.ProviderID = instance.FormatProviderID(77)
+	if err := cp.Delete(context.Background(), nodeClaim); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fsc.servers[77]; ok {
+		t.Error("expected server 77 to be deleted")
+	}
+}
+
+func TestGetInstanceTypes_NilNodePool(t *testing.T) {
+	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
+	its, err := cp.GetInstanceTypes(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(its) == 0 {
+		t.Error("expected at least one instance type")
 	}
 }
