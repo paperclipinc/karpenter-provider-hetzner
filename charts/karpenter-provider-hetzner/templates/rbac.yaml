@@ -3,15 +3,47 @@ kind: ClusterRole
 metadata:
   name: karpenter-provider-hetzner
 rules:
+  # Karpenter core CRDs.
   - apiGroups: ["karpenter.sh"]
     resources: ["nodeclaims", "nodeclaims/status", "nodepools", "nodepools/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Provider node class.
   - apiGroups: ["karpenter.hetzner.cloud"]
     resources: ["hcloudnodeclasses", "hcloudnodeclasses/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Nodes: observe + manage (label/taint/drain/terminate during disruption).
   - apiGroups: [""]
-    resources: ["nodes", "nodes/status", "pods", "events", "secrets", "configmaps"]
+    resources: ["nodes", "nodes/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core resources Karpenter's scheduling simulation observes.
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumes", "persistentvolumeclaims", "replicationcontrollers", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Workload controllers (pod ownership + scheduling simulation).
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  # Storage: volume-aware scheduling and disruption.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  # CRD readiness check (operator /readyz verifies its CRDs are established).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  # Leader election.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
