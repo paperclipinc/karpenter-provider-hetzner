@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -116,16 +117,22 @@ func (c *Controller) validateResources(ctx context.Context, nc *v1alpha1.HCloudN
 
 func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeClass) ([]v1alpha1.ResolvedImage, error) {
 	// hcloud image IDs are global (not per-location), so resolve one image per
-	// architecture. Resolution is all-or-nothing: if any supported architecture
-	// fails to resolve, the whole NodeClass is marked not-ready rather than
-	// publishing a partial set.
+	// architecture. Resolve each architecture independently: many clusters only
+	// have an image for a single arch (e.g. an all-amd64 cluster has no arm64
+	// Talos snapshot), and a NodeClass is usable as long as at least one arch
+	// resolves. Only fail when NO architecture resolves.
 	var out []v1alpha1.ResolvedImage
+	var errs []error
 	for _, arch := range []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM} {
 		img, err := c.images.Resolve(ctx, nc.Spec.ImageSelector, arch)
 		if err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("%s: %w", arch, err))
+			continue
 		}
 		out = append(out, v1alpha1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no image resolved for any architecture: %w", errors.Join(errs...))
 	}
 	return out, nil
 }
