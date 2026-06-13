@@ -37,7 +37,14 @@ type Provider struct {
 
 // NewProvider creates a new instance type provider.
 func NewProvider(client ServerTypeClient) *Provider {
-	return &Provider{client: client, unavailable: newUnavailableCache(5 * time.Minute)}
+	return &Provider{
+		client: client,
+		unavailable: newUnavailableCache(
+			// 5m: long enough to route around a saturated location, short enough to
+			// retry it soon. TODO: make configurable via operator config if needed.
+			5 * time.Minute,
+		),
+	}
 }
 
 // List returns all available InstanceTypes, filtered to those with offerings in the given locations.
@@ -76,13 +83,23 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 }
 
 // MarkUnavailable records that a (serverType, location) offering failed with a
-// capacity error so it is reported unavailable for a TTL.
+// capacity error so it is reported unavailable for a TTL. The mark takes effect
+// on the next call to List, which Karpenter invokes at the start of each
+// provisioning cycle (not within the cycle that failed).
 func (p *Provider) MarkUnavailable(serverType, location string) {
 	p.unavailable.markUnavailable(serverType, location)
 }
 
 // applyAvailability returns copies of the given instance types with each
-// offering's Available flag computed live from the unavailable cache.
+// offering's Available flag computed live from the unavailable cache, so the
+// 6h type-catalog cache never bakes in (and thus never staleness-traps)
+// availability.
+//
+// The returned InstanceType and Offering structs are fresh value-copies, so
+// setting Available never mutates the cached entries. Note that nested
+// reference fields (Requirements, Capacity, Overhead) are intentionally shared
+// with the cache, not deep-copied: callers must treat returned types as
+// read-only and must not mutate those maps.
 func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
 	out := make([]*cloudprovider.InstanceType, len(types))
 	for i, it := range types {

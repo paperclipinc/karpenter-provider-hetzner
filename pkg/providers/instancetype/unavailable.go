@@ -7,6 +7,8 @@ import (
 
 // unavailableCache tracks (serverType, location) offerings that recently failed
 // to provision with a capacity error, so they are reported unavailable for a TTL.
+// The key space is bounded (server types × locations, ~hundreds of entries at
+// most), so expired entries are left in place rather than swept.
 type unavailableCache struct {
 	ttl   time.Duration
 	mu    sync.RWMutex
