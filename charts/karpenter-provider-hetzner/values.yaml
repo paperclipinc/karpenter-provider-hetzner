@@ -21,3 +21,11 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
+
+# Required: scopes managed servers so multiple clusters can share one Hetzner project.
+clusterName: ""
+
+metrics:
+  port: 8080
+healthProbe:
+  port: 8081
