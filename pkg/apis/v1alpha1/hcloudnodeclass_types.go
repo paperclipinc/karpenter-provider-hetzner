@@ -71,8 +71,8 @@ type ImageSelector struct {
 }
 
 type ResolvedImage struct {
-	Location string `json:"location"`
-	ImageID  int64  `json:"imageID"`
+	Architecture string `json:"architecture"`
+	ImageID      int64  `json:"imageID"`
 }
 
 type HCloudNodeClassStatus struct {

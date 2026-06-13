@@ -167,14 +167,14 @@ spec:
               resolvedImages:
                 items:
                   properties:
+                    architecture:
+                      type: string
                     imageID:
                       format: int64
                       type: integer
-                    location:
-                      type: string
                   required:
+                  - architecture
                   - imageID
-                  - location
                   type: object
                 type: array
             type: object

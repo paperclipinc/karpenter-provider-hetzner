@@ -26,6 +26,12 @@ func (f fakeImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*h
 	return []*hcloud.Image{f.img}, nil
 }
 
+type emptyImages struct{}
+
+func (emptyImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return nil, nil
+}
+
 func newNodeClass() *v1alpha1.HCloudNodeClass {
 	return &v1alpha1.HCloudNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
@@ -60,8 +66,37 @@ func TestReconcile_SetsReadyWhenValid(t *testing.T) {
 	if len(got.Status.ResolvedImages) == 0 {
 		t.Error("expected resolved images")
 	}
+	for _, ri := range got.Status.ResolvedImages {
+		if ri.Architecture == "" {
+			t.Error("resolved image missing architecture")
+		}
+	}
 	if !got.StatusConditions().Root().IsTrue() {
 		t.Error("Ready should be true when all dependents are true")
+	}
+}
+
+func TestReconcile_ImageResolutionFails(t *testing.T) {
+	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(emptyImages{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &v1alpha1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.StatusConditions().Get(v1alpha1.ConditionTypeImagesReady).IsTrue() {
+		t.Error("ImagesReady should be false when image resolution fails")
+	}
+	if got.StatusConditions().Root().IsTrue() {
+		t.Error("Ready should not be true when images fail to resolve")
 	}
 }
 

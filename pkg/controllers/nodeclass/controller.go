@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"time"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -13,6 +14,8 @@ import (
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 )
+
+const resyncInterval = 5 * time.Minute
 
 // NetworkGetter is the narrow hcloud networks API the controller needs.
 type NetworkGetter interface {
@@ -60,19 +63,23 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 			return reconcile.Result{}, err
 		}
 	}
-	return reconcile.Result{}, nil
+	// Requeue periodically so the Ready condition re-reflects reality (e.g. a
+	// network deleted out-of-band, or a newer image published).
+	return reconcile.Result{RequeueAfter: resyncInterval}, nil
 }
 
 func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeClass) ([]v1alpha1.ResolvedImage, error) {
+	// hcloud image IDs are global (not per-location), so resolve one image per
+	// architecture. Resolution is all-or-nothing: if any supported architecture
+	// fails to resolve, the whole NodeClass is marked not-ready rather than
+	// publishing a partial set.
 	var out []v1alpha1.ResolvedImage
 	for _, arch := range []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM} {
 		img, err := c.images.Resolve(ctx, nc.Spec.ImageSelector, arch)
 		if err != nil {
 			return nil, err
 		}
-		for _, loc := range nc.Spec.Locations {
-			out = append(out, v1alpha1.ResolvedImage{Location: loc, ImageID: img.ID})
-		}
+		out = append(out, v1alpha1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
 	}
 	return out, nil
 }
