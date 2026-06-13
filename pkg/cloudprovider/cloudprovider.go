@@ -138,17 +138,19 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
-		Name:        nodeClaim.Name,
-		ServerType:  selected.Name,
-		Location:    location,
-		Image:       image,
-		NetworkID:   nodeClass.Spec.NetworkID,
-		FirewallIDs: nodeClass.Spec.FirewallIDs,
-		SSHKeyIDs:   nodeClass.Spec.SSHKeyIDs,
-		Labels:      nodeClass.Spec.Labels,
-		UserData:    nodeClass.Spec.UserData,
-		NodeClaim:   nodeClaim.Name,
-		NodePool:    nodePoolName,
+		Name:             nodeClaim.Name,
+		ServerType:       selected.Name,
+		Location:         location,
+		Image:            image,
+		NetworkID:        nodeClass.Spec.NetworkID,
+		FirewallIDs:      nodeClass.Spec.FirewallIDs,
+		SSHKeyIDs:        nodeClass.Spec.SSHKeyIDs,
+		Labels:           nodeClass.Spec.Labels,
+		UserData:         nodeClass.Spec.UserData,
+		NodeClaim:        nodeClaim.Name,
+		NodePool:         nodePoolName,
+		EnablePublicIPv4: nodeClass.Spec.EnablePublicIPv4,
+		EnablePublicIPv6: nodeClass.Spec.EnablePublicIPv6,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating server: %w", err)

@@ -6,9 +6,21 @@ import (
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 )
+
+// mockActionWaiter is a fake ActionWaiter for testing.
+type mockActionWaiter struct {
+	waited int
+	err    error
+}
+
+func (m *mockActionWaiter) WaitFor(_ context.Context, actions ...*hcloud.Action) error {
+	m.waited += len(actions)
+	return m.err
+}
 
 // mockServerClient is a fake ServerClient for testing.
 type mockServerClient struct {
@@ -16,6 +28,9 @@ type mockServerClient struct {
 	nextID           int64
 	deleted          []int64
 	lastListSelector string
+	action           *hcloud.Action
+	createErr        error
+	lastOpts         hcloud.ServerCreateOpts
 }
 
 func newMockServerClient() *mockServerClient {
@@ -26,17 +41,15 @@ func newMockServerClient() *mockServerClient {
 }
 
 func (m *mockServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpts) (hcloud.ServerCreateResult, *hcloud.Response, error) {
+	m.lastOpts = opts
+	if m.createErr != nil {
+		return hcloud.ServerCreateResult{}, nil, m.createErr
+	}
 	id := m.nextID
 	m.nextID++
-	server := &hcloud.Server{
-		ID:         id,
-		Name:       opts.Name,
-		Labels:     opts.Labels,
-		ServerType: opts.ServerType,
-		Location:   opts.Location,
-	}
+	server := &hcloud.Server{ID: id, Name: opts.Name, Labels: opts.Labels, ServerType: opts.ServerType, Location: opts.Location}
 	m.servers[id] = server
-	return hcloud.ServerCreateResult{Server: server}, nil, nil
+	return hcloud.ServerCreateResult{Server: server, Action: m.action}, nil, nil
 }
 
 func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Server) (*hcloud.ServerDeleteResult, *hcloud.Response, error) {
@@ -264,5 +277,40 @@ func TestList_ScopesByCluster(t *testing.T) {
 	}
 	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelManagedBy+"="+v1alpha1.ServerValueManagedBy) {
 		t.Errorf("List selector %q missing managed-by", client.lastListSelector)
+	}
+}
+
+func TestCreate_WaitsForActionsAndSetsPublicNet(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+
+	disabled := false
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1},
+		EnablePublicIPv4: &disabled, EnablePublicIPv6: nil,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if waiter.waited == 0 {
+		t.Error("expected the action waiter to be called")
+	}
+	if client.lastOpts.PublicNet == nil || client.lastOpts.PublicNet.EnableIPv4 {
+		t.Error("expected public IPv4 to be disabled in create opts")
+	}
+	if !client.lastOpts.PublicNet.EnableIPv6 {
+		t.Error("expected public IPv6 to default to enabled")
+	}
+}
+
+func TestCreate_MapsCapacityError(t *testing.T) {
+	client := newMockServerClient()
+	client.createErr = hcloud.Error{Code: hcloud.ErrorCodeResourceUnavailable}
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
+	if !karpcp.IsInsufficientCapacityError(err) {
+		t.Errorf("expected InsufficientCapacityError, got %v", err)
 	}
 }

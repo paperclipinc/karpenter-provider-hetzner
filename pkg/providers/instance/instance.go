@@ -19,15 +19,26 @@ type ServerClient interface {
 	AllWithOpts(ctx context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error)
 }
 
+// ActionWaiter waits for hcloud actions to complete. *hcloud.ActionClient satisfies it.
+type ActionWaiter interface {
+	WaitFor(ctx context.Context, actions ...*hcloud.Action) error
+}
+
 // Provider wraps hcloud server CRUD operations for Karpenter.
 type Provider struct {
 	client      ServerClient
+	waiter      ActionWaiter
 	clusterName string
 }
 
 // NewProvider creates a new instance provider.
 func NewProvider(client ServerClient, clusterName string) *Provider {
 	return &Provider{client: client, clusterName: clusterName}
+}
+
+// NewProviderWithWaiter is used when an action waiter is available (production) and in tests.
+func NewProviderWithWaiter(client ServerClient, clusterName string, waiter ActionWaiter) *Provider {
+	return &Provider{client: client, waiter: waiter, clusterName: clusterName}
 }
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
@@ -43,6 +54,12 @@ type CreateOpts struct {
 	UserData    string
 	NodeClaim   string
 	NodePool    string
+	// EnablePublicIPv4 controls whether the server gets a public IPv4 address.
+	// nil means enabled (Hetzner default).
+	EnablePublicIPv4 *bool
+	// EnablePublicIPv6 controls whether the server gets a public IPv6 address.
+	// nil means enabled (Hetzner default).
+	EnablePublicIPv6 *bool
 }
 
 // Create provisions a new Hetzner server, merging Karpenter management labels.
@@ -92,9 +109,29 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		UserData:   opts.UserData,
 	}
 
+	createOpts.PublicNet = &hcloud.ServerCreatePublicNet{
+		EnableIPv4: opts.EnablePublicIPv4 == nil || *opts.EnablePublicIPv4,
+		EnableIPv6: opts.EnablePublicIPv6 == nil || *opts.EnablePublicIPv6,
+	}
+
 	result, _, err := p.client.Create(ctx, createOpts)
 	if err != nil {
-		return nil, fmt.Errorf("creating server %q: %w", opts.Name, err)
+		return nil, MapCreateError(err)
+	}
+
+	// Wait for the create action and any follow-up actions so we only return a
+	// server that is actually being provisioned.
+	if p.waiter != nil {
+		actions := make([]*hcloud.Action, 0, 1+len(result.NextActions))
+		if result.Action != nil {
+			actions = append(actions, result.Action)
+		}
+		actions = append(actions, result.NextActions...)
+		if len(actions) > 0 {
+			if err := p.waiter.WaitFor(ctx, actions...); err != nil {
+				return nil, fmt.Errorf("waiting for server %q create actions: %w", opts.Name, err)
+			}
+		}
 	}
 	return result.Server, nil
 }
