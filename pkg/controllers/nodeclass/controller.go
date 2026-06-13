@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -22,15 +23,27 @@ type NetworkGetter interface {
 	GetByID(ctx context.Context, id int64) (*hcloud.Network, *hcloud.Response, error)
 }
 
+// FirewallGetter is the narrow hcloud firewalls API the controller needs.
+type FirewallGetter interface {
+	GetByID(ctx context.Context, id int64) (*hcloud.Firewall, *hcloud.Response, error)
+}
+
+// SSHKeyGetter is the narrow hcloud SSH keys API the controller needs.
+type SSHKeyGetter interface {
+	GetByID(ctx context.Context, id int64) (*hcloud.SSHKey, *hcloud.Response, error)
+}
+
 // Controller reconciles HCloudNodeClass status.
 type Controller struct {
 	kubeClient client.Client
 	networks   NetworkGetter
+	firewalls  FirewallGetter
+	sshKeys    SSHKeyGetter
 	images     *imagefamily.Provider
 }
 
-func NewController(kubeClient client.Client, networks NetworkGetter, images *imagefamily.Provider) *Controller {
-	return &Controller{kubeClient: kubeClient, networks: networks, images: images}
+func NewController(kubeClient client.Client, networks NetworkGetter, firewalls FirewallGetter, sshKeys SSHKeyGetter, images *imagefamily.Provider) *Controller {
+	return &Controller{kubeClient: kubeClient, networks: networks, firewalls: firewalls, sshKeys: sshKeys, images: images}
 }
 
 func (c *Controller) Name() string { return "nodeclass.status" }
@@ -47,6 +60,15 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeNetworkReady, "NetworkNotFound", "configured networkID does not exist")
 	default:
 		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeNetworkReady)
+	}
+
+	// Validate referenced firewalls and SSH keys exist.
+	if reason, msg, unknown, ok := c.validateResources(ctx, nc); ok {
+		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeResourcesReady)
+	} else if unknown {
+		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeResourcesReady, reason, msg)
+	} else {
+		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeResourcesReady, reason, msg)
 	}
 
 	// Image resolution for both architectures.
@@ -66,6 +88,30 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 	// Requeue periodically so the Ready condition re-reflects reality (e.g. a
 	// network deleted out-of-band, or a newer image published).
 	return reconcile.Result{RequeueAfter: resyncInterval}, nil
+}
+
+// validateResources checks every referenced firewall and SSH key exists.
+// Returns ok=true when all exist; unknown=true on a transient API error.
+func (c *Controller) validateResources(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
+	for _, id := range nc.Spec.FirewallIDs {
+		fw, _, err := c.firewalls.GetByID(ctx, id)
+		if err != nil {
+			return "FirewallCheckFailed", err.Error(), true, false
+		}
+		if fw == nil {
+			return "FirewallNotFound", fmt.Sprintf("firewall %d does not exist", id), false, false
+		}
+	}
+	for _, id := range nc.Spec.SSHKeyIDs {
+		key, _, err := c.sshKeys.GetByID(ctx, id)
+		if err != nil {
+			return "SSHKeyCheckFailed", err.Error(), true, false
+		}
+		if key == nil {
+			return "SSHKeyNotFound", fmt.Sprintf("ssh key %d does not exist", id), false, false
+		}
+	}
+	return "", "", false, true
 }
 
 func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeClass) ([]v1alpha1.ResolvedImage, error) {

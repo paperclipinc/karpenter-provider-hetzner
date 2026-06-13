@@ -58,7 +58,7 @@ func main() {
 	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 
 	// Our NodeClass status controller (network + image validation, Ready).
-	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, imageProvider)
+	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, &hcloudClient.Firewall, &hcloudClient.SSHKey, imageProvider)
 
 	// Wire and start all controllers.
 	op.WithControllers(ctx, append(

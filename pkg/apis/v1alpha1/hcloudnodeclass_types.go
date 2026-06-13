@@ -7,8 +7,9 @@ import (
 
 // Status condition types for HCloudNodeClass.
 const (
-	ConditionTypeImagesReady  = "ImagesReady"
-	ConditionTypeNetworkReady = "NetworkReady"
+	ConditionTypeImagesReady    = "ImagesReady"
+	ConditionTypeNetworkReady   = "NetworkReady"
+	ConditionTypeResourcesReady = "ResourcesReady"
 )
 
 // +kubebuilder:object:root=true
@@ -82,7 +83,7 @@ type HCloudNodeClassStatus struct {
 	ResolvedImages []ResolvedImage `json:"resolvedImages,omitempty"`
 }
 
-var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady)
+var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady)
 
 func (in *HCloudNodeClass) GetConditions() []status.Condition {
 	return in.Status.Conditions
