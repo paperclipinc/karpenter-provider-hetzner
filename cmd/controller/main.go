@@ -15,6 +15,7 @@ import (
 	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"
 	hetznerop "github.com/paperclipinc/karpenter-provider-hetzner/pkg/operator"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
@@ -56,16 +57,22 @@ func main() {
 	// Create cluster state.
 	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 
+	// Our NodeClass status controller (network + image validation, Ready).
+	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, imageProvider)
+
 	// Wire and start all controllers.
-	op.WithControllers(ctx, controllers.NewControllers(
-		ctx,
-		op.Manager,
-		op.Clock,
-		op.GetClient(),
-		op.EventRecorder,
-		cloudProvider,
-		baseCloudProvider,
-		clusterState,
-		op.InstanceTypeStore,
+	op.WithControllers(ctx, append(
+		controllers.NewControllers(
+			ctx,
+			op.Manager,
+			op.Clock,
+			op.GetClient(),
+			op.EventRecorder,
+			cloudProvider,
+			baseCloudProvider,
+			clusterState,
+			op.InstanceTypeStore,
+		),
+		nodeClassController,
 	)...).Start(ctx)
 }

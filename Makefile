@@ -1,9 +1,11 @@
-.PHONY: build test lint generate generate-verify docker-build
+.PHONY: build test lint generate generate-verify docker-build test-envtest
 
 BINARY         := karpenter-provider-hetzner
 IMAGE          := ghcr.io/paperclipinc/karpenter-provider-hetzner
 TAG            ?= latest
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0
+ENVTEST        := go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+ENVTEST_K8S_VERSION ?= 1.34.0
 
 build:
 	go build -o bin/$(BINARY) ./cmd/controller
@@ -24,6 +26,10 @@ generate-verify: generate
 		git --no-pager diff -- pkg/apis charts/karpenter-provider-hetzner/crds; \
 		exit 1; \
 	fi
+
+test-envtest:
+	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+		go test -race -count=1 ./pkg/controllers/...
 
 docker-build:
 	docker build -t $(IMAGE):$(TAG) .
