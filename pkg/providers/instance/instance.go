@@ -31,12 +31,15 @@ type Provider struct {
 	clusterName string
 }
 
-// NewProvider creates a new instance provider.
+// NewProvider returns a Provider that does NOT wait for hcloud actions to
+// complete after server creation. Use it only in tests that do not exercise
+// action waiting; production code should use NewProviderWithWaiter.
 func NewProvider(client ServerClient, clusterName string) *Provider {
 	return &Provider{client: client, clusterName: clusterName}
 }
 
-// NewProviderWithWaiter is used when an action waiter is available (production) and in tests.
+// NewProviderWithWaiter returns a Provider that blocks after server creation
+// until all hcloud create actions complete. Use this in production.
 func NewProviderWithWaiter(client ServerClient, clusterName string, waiter ActionWaiter) *Provider {
 	return &Provider{client: client, waiter: waiter, clusterName: clusterName}
 }
@@ -54,12 +57,8 @@ type CreateOpts struct {
 	UserData    string
 	NodeClaim   string
 	NodePool    string
-	// EnablePublicIPv4 controls whether the server gets a public IPv4 address.
-	// nil means enabled (Hetzner default).
-	EnablePublicIPv4 *bool
-	// EnablePublicIPv6 controls whether the server gets a public IPv6 address.
-	// nil means enabled (Hetzner default).
-	EnablePublicIPv6 *bool
+	EnablePublicIPv4 bool
+	EnablePublicIPv6 bool
 }
 
 // Create provisions a new Hetzner server, merging Karpenter management labels.
@@ -110,8 +109,8 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 	}
 
 	createOpts.PublicNet = &hcloud.ServerCreatePublicNet{
-		EnableIPv4: opts.EnablePublicIPv4 == nil || *opts.EnablePublicIPv4,
-		EnableIPv6: opts.EnablePublicIPv6 == nil || *opts.EnablePublicIPv6,
+		EnableIPv4: opts.EnablePublicIPv4,
+		EnableIPv6: opts.EnablePublicIPv6,
 	}
 
 	result, _, err := p.client.Create(ctx, createOpts)

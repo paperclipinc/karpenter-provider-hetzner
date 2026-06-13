@@ -149,8 +149,8 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		UserData:         nodeClass.Spec.UserData,
 		NodeClaim:        nodeClaim.Name,
 		NodePool:         nodePoolName,
-		EnablePublicIPv4: nodeClass.Spec.EnablePublicIPv4,
-		EnablePublicIPv6: nodeClass.Spec.EnablePublicIPv6,
+		EnablePublicIPv4: nodeClass.Spec.PublicIPv4Enabled(),
+		EnablePublicIPv6: nodeClass.Spec.PublicIPv6Enabled(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating server: %w", err)

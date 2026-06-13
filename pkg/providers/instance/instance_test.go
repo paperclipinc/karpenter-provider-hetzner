@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,6 +30,7 @@ type mockServerClient struct {
 	deleted          []int64
 	lastListSelector string
 	action           *hcloud.Action
+	nextActions      []*hcloud.Action
 	createErr        error
 	lastOpts         hcloud.ServerCreateOpts
 }
@@ -49,7 +51,7 @@ func (m *mockServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpt
 	m.nextID++
 	server := &hcloud.Server{ID: id, Name: opts.Name, Labels: opts.Labels, ServerType: opts.ServerType, Location: opts.Location}
 	m.servers[id] = server
-	return hcloud.ServerCreateResult{Server: server, Action: m.action}, nil, nil
+	return hcloud.ServerCreateResult{Server: server, Action: m.action, NextActions: m.nextActions}, nil, nil
 }
 
 func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Server) (*hcloud.ServerDeleteResult, *hcloud.Response, error) {
@@ -286,10 +288,9 @@ func TestCreate_WaitsForActionsAndSetsPublicNet(t *testing.T) {
 	waiter := &mockActionWaiter{}
 	p := NewProviderWithWaiter(client, "test-cluster", waiter)
 
-	disabled := false
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1},
-		EnablePublicIPv4: &disabled, EnablePublicIPv6: nil,
+		EnablePublicIPv4: false, EnablePublicIPv6: true,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -312,5 +313,30 @@ func TestCreate_MapsCapacityError(t *testing.T) {
 	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
 	if !karpcp.IsInsufficientCapacityError(err) {
 		t.Errorf("expected InsufficientCapacityError, got %v", err)
+	}
+}
+
+func TestCreate_WaiterErrorIsWrapped(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{err: fmt.Errorf("action failed")}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
+	if err == nil || !strings.Contains(err.Error(), "waiting for server") {
+		t.Errorf("expected wrapped wait error, got %v", err)
+	}
+}
+
+func TestCreate_WaitsForNextActions(t *testing.T) {
+	client := newMockServerClient()
+	client.action = nil
+	client.nextActions = []*hcloud.Action{{ID: 2}, {ID: 3}}
+	waiter := &mockActionWaiter{}
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	if _, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if waiter.waited != 2 {
+		t.Errorf("expected 2 next-actions waited, got %d", waiter.waited)
 	}
 }
