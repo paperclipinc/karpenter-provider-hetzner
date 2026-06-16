@@ -55,3 +55,13 @@ func TestResolveUserData_MissingKey(t *testing.T) {
 		t.Fatal("expected error for missing key, got nil")
 	}
 }
+
+func TestResolveUserData_SecretNotFound(t *testing.T) {
+	c := fake.NewClientBuilder().Build() // no objects registered
+	nc := &v1alpha1.HCloudNodeClass{Spec: v1alpha1.HCloudNodeClassSpec{
+		BootstrapRef: &v1alpha1.BootstrapRef{Name: "missing", Namespace: "karpenter"},
+	}}
+	if _, err := resolveUserData(context.Background(), c, nc); err == nil {
+		t.Fatal("expected error for missing secret, got nil")
+	}
+}

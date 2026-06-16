@@ -52,7 +52,9 @@ type HCloudNodeClassSpec struct {
 // BootstrapRef references a Secret key holding the server userData (e.g. a Talos
 // worker machineconfig or a cloud-init document).
 type BootstrapRef struct {
-	Name      string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
 	Namespace string `json:"namespace"`
 	// +kubebuilder:default=userData
 	// +optional
