@@ -550,3 +550,93 @@ func TestCreate_UserDataSecretMissing(t *testing.T) {
 		t.Fatal("expected error when userDataSecretRef points to a missing Secret, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DriftNetwork test (the detection code exists but was untested)
+// ---------------------------------------------------------------------------
+
+// TestIsDrifted_Network verifies that a server not attached to the NodeClass
+// network is flagged as DriftNetwork.
+func TestIsDrifted_Network(t *testing.T) {
+	nc := baselineNodeClass() // expects NetworkID=1
+	server := baselineServer()
+	// Replace the attached network with a different ID.
+	server.PrivateNet = []hcloud.ServerPrivateNet{{Network: &hcloud.Network{ID: 99}}}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != cloudprovider.DriftNetwork {
+		t.Errorf("want DriftNetwork, got %q", reason)
+	}
+}
+
+// TestIsDrifted_NetworkAttached_NoDrift verifies that a server correctly
+// attached to the NodeClass network is not flagged as drifted.
+func TestIsDrifted_NetworkAttached_NoDrift(t *testing.T) {
+	nc := baselineNodeClass() // expects NetworkID=1
+	server := baselineServer()
+	server.PrivateNet = []hcloud.ServerPrivateNet{{Network: &hcloud.Network{ID: 1}}}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Errorf("expected no drift when network correctly attached, got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Location drift tests
+// ---------------------------------------------------------------------------
+
+// TestIsDrifted_Location verifies that a server whose datacenter location is
+// not in the NodeClass Locations list is flagged as DriftLocation.
+func TestIsDrifted_Location(t *testing.T) {
+	nc := baselineNodeClass() // Locations: ["nbg1"]
+	server := baselineServer()
+	// Server is in "hel1" which is not in the NodeClass locations.
+	server.Datacenter = &hcloud.Datacenter{Location: &hcloud.Location{Name: "hel1"}}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != cloudprovider.DriftLocation {
+		t.Errorf("want DriftLocation, got %q", reason)
+	}
+}
+
+// TestIsDrifted_LocationInList_NoDrift verifies that a server in a location
+// that is present in the NodeClass Locations list is not flagged as drifted.
+func TestIsDrifted_LocationInList_NoDrift(t *testing.T) {
+	nc := baselineNodeClass() // Locations: ["nbg1"]
+	server := baselineServer()
+	server.Datacenter = &hcloud.Datacenter{Location: &hcloud.Location{Name: "nbg1"}}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Errorf("expected no drift when location is in list, got %q", reason)
+	}
+}
+
+// TestIsDrifted_Location_NilDatacenter_NoDrift verifies that a server with a
+// nil Datacenter (e.g. mid-provisioning) does not report location drift.
+func TestIsDrifted_Location_NilDatacenter_NoDrift(t *testing.T) {
+	nc := baselineNodeClass()
+	server := baselineServer()
+	server.Datacenter = nil // nil datacenter -> guard should skip the check
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Errorf("expected no drift for nil Datacenter, got %q", reason)
+	}
+}

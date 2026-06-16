@@ -30,6 +30,7 @@ const (
 	DriftNetwork    karpcp.DriftReason = "NetworkDrift"
 	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
 	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
+	DriftLocation   karpcp.DriftReason = "LocationDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -151,19 +152,20 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
-		Name:             nodeClaim.Name,
-		ServerType:       selected.Name,
-		Location:         location,
-		Image:            image,
-		NetworkID:        nodeClass.Spec.NetworkID,
-		FirewallIDs:      nodeClass.Spec.FirewallIDs,
-		SSHKeyIDs:        nodeClass.Spec.SSHKeyIDs,
-		Labels:           nodeClass.Spec.Labels,
-		UserData:         userData,
-		NodeClaim:        nodeClaim.Name,
-		NodePool:         nodePoolName,
-		EnablePublicIPv4: nodeClass.Spec.PublicIPv4Enabled(),
-		EnablePublicIPv6: nodeClass.Spec.PublicIPv6Enabled(),
+		Name:                   nodeClaim.Name,
+		ServerType:             selected.Name,
+		Location:               location,
+		Image:                  image,
+		NetworkID:              nodeClass.Spec.NetworkID,
+		FirewallIDs:            nodeClass.Spec.FirewallIDs,
+		SSHKeyIDs:              nodeClass.Spec.SSHKeyIDs,
+		Labels:                 nodeClass.Spec.Labels,
+		UserData:               userData,
+		NodeClaim:              nodeClaim.Name,
+		NodePool:               nodePoolName,
+		PlacementGroupStrategy: nodeClass.Spec.PlacementGroupStrategy,
+		EnablePublicIPv4:       nodeClass.Spec.PublicIPv4Enabled(),
+		EnablePublicIPv6:       nodeClass.Spec.PublicIPv6Enabled(),
 	})
 	if err != nil {
 		if karpcp.IsInsufficientCapacityError(err) {
@@ -310,6 +312,23 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
 		server.ServerType != nil && server.ServerType.Name != want {
 		return DriftServerType, nil
+	}
+
+	// Location drift: the server's datacenter location must be in the NodeClass
+	// Locations list. Guards nil Datacenter/Location pointers defensively.
+	if len(nodeClass.Spec.Locations) > 0 &&
+		server.Datacenter != nil && server.Datacenter.Location != nil {
+		serverLocation := server.Datacenter.Location.Name
+		inAllowed := false
+		for _, loc := range nodeClass.Spec.Locations {
+			if loc == serverLocation {
+				inAllowed = true
+				break
+			}
+		}
+		if !inAllowed {
+			return DriftLocation, nil
+		}
 	}
 
 	// SSH-key and user-data drift are intentionally not checked: Hetzner does not
