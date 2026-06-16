@@ -12,10 +12,12 @@ import (
 
 // mockImageClient is a fake ImageClient for testing.
 type mockImageClient struct {
-	images []*hcloud.Image
+	images   []*hcloud.Image
+	lastOpts hcloud.ImageListOpts
 }
 
 func (m *mockImageClient) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	m.lastOpts = opts
 	var result []*hcloud.Image
 	for _, img := range m.images {
 		// Filter by type if specified.
@@ -178,5 +180,19 @@ func TestResolveUnsupportedFamily(t *testing.T) {
 	_, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "fedora"}, hcloud.ArchitectureX86)
 	if err == nil {
 		t.Fatal("expected error for unsupported family, got nil")
+	}
+}
+
+func TestResolveTalos_LabelSelectorForwarded(t *testing.T) {
+	fc := &mockImageClient{images: []*hcloud.Image{
+		{ID: 1, Description: "talos-v1.13.3", Architecture: hcloud.ArchitectureX86, Type: hcloud.ImageTypeSnapshot},
+	}}
+	p := NewProvider(fc)
+	sel := v1alpha1.ImageSelector{Family: "talos", Selector: map[string]string{"caph-image-name": "talos-v1.13.3-gvisor"}}
+	if _, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := fc.lastOpts.ListOpts.LabelSelector; got != "caph-image-name=talos-v1.13.3-gvisor" {
+		t.Fatalf("label selector not forwarded: got %q", got)
 	}
 }

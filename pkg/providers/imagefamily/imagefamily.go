@@ -3,6 +3,7 @@ package imagefamily
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -25,14 +26,33 @@ func NewProvider(client ImageClient) *Provider {
 	return &Provider{client: client}
 }
 
+// labelSelectorString renders an hcloud label selector from a map (sorted for
+// determinism).
+func labelSelectorString(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	return strings.Join(parts, ",")
+}
+
 // Resolve returns the best matching image for the given selector and architecture.
 // Supported families: "ubuntu", "talos".
 func (p *Provider) Resolve(ctx context.Context, selector v1alpha1.ImageSelector, arch hcloud.Architecture) (*hcloud.Image, error) {
+	ls := labelSelectorString(selector.Selector)
 	switch strings.ToLower(selector.Family) {
 	case "ubuntu":
-		return p.resolveUbuntu(ctx, selector.Version, arch)
+		return p.resolveUbuntu(ctx, selector.Version, arch, ls)
 	case "talos":
-		return p.resolveTalos(ctx, selector.Version, arch)
+		return p.resolveTalos(ctx, selector.Version, arch, ls)
 	default:
 		return nil, fmt.Errorf("unsupported image family %q: must be one of ubuntu, talos", selector.Family)
 	}
@@ -40,10 +60,11 @@ func (p *Provider) Resolve(ctx context.Context, selector v1alpha1.ImageSelector,
 
 // resolveUbuntu finds a system image whose description contains "ubuntu" and optionally the given version.
 // Returns the first matching image.
-func (p *Provider) resolveUbuntu(ctx context.Context, version string, arch hcloud.Architecture) (*hcloud.Image, error) {
+func (p *Provider) resolveUbuntu(ctx context.Context, version string, arch hcloud.Architecture, ls string) (*hcloud.Image, error) {
 	images, err := p.client.AllWithOpts(ctx, hcloud.ImageListOpts{
 		Type:         []hcloud.ImageType{hcloud.ImageTypeSystem},
 		Architecture: []hcloud.Architecture{arch},
+		ListOpts:     hcloud.ListOpts{LabelSelector: ls},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing ubuntu images: %w", err)
@@ -67,10 +88,11 @@ func (p *Provider) resolveUbuntu(ctx context.Context, version string, arch hclou
 }
 
 // resolveTalos finds the newest snapshot image whose description contains "talos" and optionally the given version.
-func (p *Provider) resolveTalos(ctx context.Context, version string, arch hcloud.Architecture) (*hcloud.Image, error) {
+func (p *Provider) resolveTalos(ctx context.Context, version string, arch hcloud.Architecture, ls string) (*hcloud.Image, error) {
 	images, err := p.client.AllWithOpts(ctx, hcloud.ImageListOpts{
 		Type:         []hcloud.ImageType{hcloud.ImageTypeSnapshot},
 		Architecture: []hcloud.Architecture{arch},
+		ListOpts:     hcloud.ListOpts{LabelSelector: ls},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing talos images: %w", err)
