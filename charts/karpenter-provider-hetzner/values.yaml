@@ -29,3 +29,14 @@ metrics:
   port: 8080
 healthProbe:
   port: 8081
+
+# serviceMonitor wires a Prometheus Operator ServiceMonitor to the metrics port.
+# Requires the prometheus.io/operator CRD to be installed in the cluster.
+serviceMonitor:
+  # enabled: set true to deploy the Service + ServiceMonitor resources.
+  enabled: false
+  # interval: how often Prometheus scrapes the metrics endpoint.
+  interval: 30s
+  # additionalLabels: extra labels to add to the ServiceMonitor (e.g. for a
+  # Prometheus Operator instance selector).
+  additionalLabels: {}
