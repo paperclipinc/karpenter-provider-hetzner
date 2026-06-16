@@ -21,6 +21,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
