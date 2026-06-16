@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -44,10 +45,20 @@ type Controller struct {
 	firewalls  FirewallGetter
 	sshKeys    SSHKeyGetter
 	images     *imagefamily.Provider
+	recorder   events.EventRecorder
 }
 
 func NewController(kubeClient client.Client, networks NetworkGetter, firewalls FirewallGetter, sshKeys SSHKeyGetter, images *imagefamily.Provider) *Controller {
 	return &Controller{kubeClient: kubeClient, networks: networks, firewalls: firewalls, sshKeys: sshKeys, images: images}
+}
+
+// warnf emits a Warning event on the HCloudNodeClass when a recorder is
+// available, and is a no-op otherwise (the controller still sets conditions).
+func (c *Controller) warnf(nc *v1alpha1.HCloudNodeClass, reason, action, format string, args ...interface{}) {
+	if c.recorder == nil {
+		return
+	}
+	c.recorder.Eventf(nc, nil, corev1.EventTypeWarning, reason, action, format, args...)
 }
 
 func (c *Controller) Name() string { return "nodeclass.status" }
@@ -60,8 +71,10 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 	switch {
 	case err != nil:
 		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeNetworkReady, "NetworkCheckFailed", err.Error())
+		c.warnf(nc, "NetworkCheckFailed", "ValidateNetwork", "network check failed: %v", err)
 	case net == nil:
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeNetworkReady, "NetworkNotFound", "configured networkID does not exist")
+		c.warnf(nc, "NetworkNotFound", "ValidateNetwork", "networkID %d does not exist", nc.Spec.NetworkID)
 	default:
 		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeNetworkReady)
 	}
@@ -71,8 +84,10 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeResourcesReady)
 	} else if unknown {
 		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeResourcesReady, reason, msg)
+		c.warnf(nc, reason, "ValidateResources", "%s", msg)
 	} else {
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeResourcesReady, reason, msg)
+		c.warnf(nc, reason, "ValidateResources", "%s", msg)
 	}
 
 	// Validate the userData secret ref (if set).
@@ -80,14 +95,17 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeUserDataReady)
 	} else if unknown {
 		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+		c.warnf(nc, reason, "ValidateUserData", "%s", msg)
 	} else {
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+		c.warnf(nc, reason, "ValidateUserData", "%s", msg)
 	}
 
 	// Image resolution for both architectures.
 	resolved, ierr := c.resolveImages(ctx, nc)
 	if ierr != nil {
 		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
+		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
 	} else {
 		nc.Status.ResolvedImages = resolved
 		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesReady)
@@ -172,6 +190,7 @@ func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeC
 
 // Register wires the controller into the manager.
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
+	c.recorder = m.GetEventRecorder(c.Name())
 	return controllerruntime.NewControllerManagedBy(m).
 		For(&v1alpha1.HCloudNodeClass{}).
 		Named(c.Name()).

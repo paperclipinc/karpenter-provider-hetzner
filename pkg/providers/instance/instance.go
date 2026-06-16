@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 )
 
 // ServerClient is the narrow interface for the hcloud servers API needed by this provider.
@@ -119,6 +121,18 @@ func (p *Provider) getOrCreatePlacementGroup(ctx context.Context, name string) (
 
 // Create provisions a new Hetzner server, merging Karpenter management labels.
 func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server, error) {
+	start := time.Now()
+	server, err := p.create(ctx, opts)
+	result := metrics.ResultSuccess
+	if err != nil {
+		result = metrics.ResultError
+	}
+	metrics.RecordServerCreate(result, time.Since(start))
+	return server, err
+}
+
+// create is the internal implementation of Create, instrumented by Create().
+func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server, error) {
 	log := logf.FromContext(ctx)
 	labels := make(map[string]string, len(opts.Labels)+3)
 	for k, v := range opts.Labels {
@@ -218,6 +232,17 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 // Delete removes the server identified by providerID.
 // If the server is already gone (NotFound), Delete returns nil (idempotent).
 func (p *Provider) Delete(ctx context.Context, providerID string) error {
+	err := p.delete(ctx, providerID)
+	result := metrics.ResultSuccess
+	if err != nil {
+		result = metrics.ResultError
+	}
+	metrics.RecordServerDelete(result)
+	return err
+}
+
+// delete is the internal implementation of Delete, instrumented by Delete().
+func (p *Provider) delete(ctx context.Context, providerID string) error {
 	log := logf.FromContext(ctx)
 	id, err := ParseProviderID(providerID)
 	if err != nil {

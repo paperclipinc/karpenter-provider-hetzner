@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 )
 
 const cacheTTL = 6 * time.Hour
@@ -54,6 +55,7 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
 		cached := p.cachedTypes
 		p.mu.RUnlock()
+		metrics.RecordCacheHit()
 		return p.applyAvailability(filterByLocations(cached, locations)), nil
 	}
 	p.mu.RUnlock()
@@ -63,8 +65,12 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 
 	// Double-check after acquiring write lock.
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
+		metrics.RecordCacheHit()
 		return p.applyAvailability(filterByLocations(p.cachedTypes, locations)), nil
 	}
+
+	// Cache miss: fetch fresh data from the hcloud API.
+	metrics.RecordCacheMiss()
 
 	serverTypes, err := p.client.All(ctx)
 	if err != nil {

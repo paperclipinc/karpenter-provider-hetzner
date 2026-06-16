@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instancetype"
@@ -269,10 +270,11 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 		return "", nil
 	}
 
-	// logDrift emits a structured INFO log and returns the reason so callers can
-	// write: return logDrift(log, reason, providerID), nil
+	// logDrift emits a structured INFO log, records a Prometheus counter, and
+	// returns the reason so callers can write: return logDrift(reason, id), nil
 	logDrift := func(reason karpcp.DriftReason, providerID string) karpcp.DriftReason {
 		log.Info("drift detected", "reason", string(reason), "providerID", providerID)
+		metrics.RecordDrift(string(reason))
 		return reason
 	}
 
