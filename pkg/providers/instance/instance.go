@@ -39,21 +39,22 @@ type Provider struct {
 }
 
 // NewProvider returns a Provider that does NOT wait for hcloud actions to
-// complete after server creation. Use it only in tests that do not exercise
-// action waiting; production code should use NewProviderWithWaiter.
+// complete after server creation and has no placement-group support. Intended
+// for tests; production uses NewProviderWithPlacementGroups.
 func NewProvider(client ServerClient, clusterName string) *Provider {
 	return &Provider{client: client, clusterName: clusterName}
 }
 
 // NewProviderWithWaiter returns a Provider that blocks after server creation
-// until all hcloud create actions complete. Use this in production.
+// until all hcloud create actions complete, but has no placement-group support.
+// Intended for tests; production uses NewProviderWithPlacementGroups.
 func NewProviderWithWaiter(client ServerClient, clusterName string, waiter ActionWaiter) *Provider {
 	return &Provider{client: client, waiter: waiter, clusterName: clusterName}
 }
 
 // NewProviderWithPlacementGroups returns a Provider that supports placement
-// groups and waits for hcloud create actions to complete. Use this in
-// production when PlacementGroupStrategy is needed.
+// groups and waits for hcloud create actions to complete. This is the
+// production constructor.
 func NewProviderWithPlacementGroups(client ServerClient, pgClient PlacementGroupClient, clusterName string, waiter ActionWaiter) *Provider {
 	return &Provider{client: client, pgClient: pgClient, waiter: waiter, clusterName: clusterName}
 }
@@ -76,19 +77,24 @@ type CreateOpts struct {
 	EnablePublicIPv6       bool
 }
 
-// placementGroupName returns the deterministic placement group name for a node pool.
-// When nodePool is empty it falls back to "karpenter".
-func placementGroupName(nodePool string) string {
+// placementGroupName returns the deterministic placement group name for a node
+// pool, scoped to the cluster so two clusters sharing a Hetzner project (and a
+// node-pool name) do not collide on the same placement group. When nodePool is
+// empty it falls back to the cluster-scoped default.
+func placementGroupName(clusterName, nodePool string) string {
+	base := "karpenter-" + clusterName
 	if nodePool == "" {
-		return "karpenter"
+		return base
 	}
-	return "karpenter-" + nodePool
+	return base + "-" + nodePool
 }
 
 // getOrCreatePlacementGroup finds an existing placement group of type spread
 // with the given name, creating it if it does not exist yet. It returns the
 // group's ID, or 0 and an error on failure.
 func (p *Provider) getOrCreatePlacementGroup(ctx context.Context, name string) (int64, error) {
+	// AllWithOpts filters server-side by Name + Type, so a non-empty result is
+	// already the group we want.
 	existing, err := p.pgClient.AllWithOpts(ctx, hcloud.PlacementGroupListOpts{
 		Name: name,
 		Type: hcloud.PlacementGroupTypeSpread,
@@ -96,10 +102,8 @@ func (p *Provider) getOrCreatePlacementGroup(ctx context.Context, name string) (
 	if err != nil {
 		return 0, fmt.Errorf("listing placement groups: %w", err)
 	}
-	for _, pg := range existing {
-		if pg.Name == name {
-			return pg.ID, nil
-		}
+	if len(existing) > 0 {
+		return existing[0].ID, nil
 	}
 
 	result, _, err := p.pgClient.Create(ctx, hcloud.PlacementGroupCreateOpts{
@@ -167,7 +171,7 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 	// Apply placement group when strategy is "spread" (or empty, since spread
 	// is the kubebuilder default). Strategy "none" intentionally skips this.
 	if p.pgClient != nil && opts.PlacementGroupStrategy != "none" {
-		pgName := placementGroupName(opts.NodePool)
+		pgName := placementGroupName(p.clusterName, opts.NodePool)
 		pgID, err := p.getOrCreatePlacementGroup(ctx, pgName)
 		if err != nil {
 			return nil, fmt.Errorf("resolving placement group: %w", err)

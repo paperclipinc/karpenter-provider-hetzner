@@ -409,8 +409,8 @@ func TestCreate_SpreadStrategy_CreatesPG(t *testing.T) {
 	if pgc.createCalls != 1 {
 		t.Errorf("expected 1 PG create call, got %d", pgc.createCalls)
 	}
-	if pgc.lastCreateOpts.Name != "karpenter-my-pool" {
-		t.Errorf("expected PG name %q, got %q", "karpenter-my-pool", pgc.lastCreateOpts.Name)
+	if pgc.lastCreateOpts.Name != "karpenter-test-cluster-my-pool" {
+		t.Errorf("expected PG name %q, got %q", "karpenter-test-cluster-my-pool", pgc.lastCreateOpts.Name)
 	}
 	if pgc.lastCreateOpts.Type != hcloud.PlacementGroupTypeSpread {
 		t.Errorf("expected spread type, got %q", pgc.lastCreateOpts.Type)
@@ -478,7 +478,7 @@ func TestCreate_SpreadStrategy_ReusesPG(t *testing.T) {
 	// Pre-seed an existing placement group with the expected name.
 	existingID := int64(999)
 	pgc.groups = []*hcloud.PlacementGroup{
-		{ID: existingID, Name: "karpenter-my-pool", Type: hcloud.PlacementGroupTypeSpread},
+		{ID: existingID, Name: "karpenter-test-cluster-my-pool", Type: hcloud.PlacementGroupTypeSpread},
 	}
 	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
 
@@ -521,7 +521,7 @@ func TestCreate_SpreadStrategy_EmptyNodePool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pgc.lastCreateOpts.Name != "karpenter" {
-		t.Errorf("expected PG name %q for empty NodePool, got %q", "karpenter", pgc.lastCreateOpts.Name)
+	if pgc.lastCreateOpts.Name != "karpenter-test-cluster" {
+		t.Errorf("expected PG name %q for empty NodePool, got %q", "karpenter-test-cluster", pgc.lastCreateOpts.Name)
 	}
 }
