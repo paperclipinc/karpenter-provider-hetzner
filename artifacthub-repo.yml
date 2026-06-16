@@ -1,0 +1,13 @@
+# Artifact Hub repository metadata for the OCI Helm chart.
+# Push this to the OCI registry alongside the chart so Artifact Hub can verify
+# ownership:
+#   oci://ghcr.io/paperclipinc/charts
+# See https://artifacthub.io/docs/topics/repositories/helm-charts/#oci-registries
+#
+# repositoryID is issued by Artifact Hub when the repo is first registered at
+# https://artifacthub.io/control-panel/repositories (add repo -> Helm charts ->
+# OCI registry URL above). Paste the generated ID here, then re-push this file.
+repositoryID: ""
+owners:
+  - name: paperclip.inc
+    email: ops@paperclip.inc
