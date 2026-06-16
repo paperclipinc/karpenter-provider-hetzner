@@ -127,17 +127,35 @@ Provisioned nodes carry, in addition to the well-known Karpenter labels:
 | `locations` | `[]string` | yes | — | Hetzner locations (min 1) |
 | `networkID` | `int64` | yes | — | Private network ID nodes attach to |
 | `imageSelector.family` | `talos`\|`ubuntu` | yes | — | OS image family |
-| `imageSelector.version` | `string` | no | newest | Version substring to match |
+| `imageSelector.version` | `string` | no | newest | Version substring to match against the image description |
+| `imageSelector.selector` | `map[string]string` | no | — | hcloud label filter applied when listing images (e.g. `{"caph-image-name": "talos-v1.9.5-gvisor"}`). Prefer this over `version` to pin an exact snapshot (version + baked extensions). All labels must match; the provider guards against provisioning a node whose resolved image arch does not match the server type. |
 | `firewallIDs` | `[]int64` | no | — | Firewalls to attach |
 | `sshKeyIDs` | `[]int64` | no | — | SSH keys to install |
-| `placementGroupStrategy` | `spread`\|`none` | no | `spread` | Placement-group behavior |
-| `enablePublicIPv4` | `bool` | no | `true` | Attach a public IPv4 (billed) |
-| `enablePublicIPv6` | `bool` | no | `true` | Attach a public IPv6 |
-| `labels` | `map[string]string` | no | — | Extra labels on the Hetzner server |
-| `userData` | `string` | no | — | cloud-init / Talos machine config |
-| `userDataSecretRef` | `object {namespace, name, key}` | no | — | Source `userData` from a Secret (keeps secret bootstrap data out of git); takes precedence over `userData` |
+| `placementGroupStrategy` | `spread`\|`none` | no | `spread` | Placement-group behavior. `spread` distributes nodes across physical hosts; `none` disables placement groups. |
+| `enablePublicIPv4` | `*bool` | no | `true` | Attach a public IPv4 (billed separately by Hetzner). Set `false` on private-network clusters to drop the charge. |
+| `enablePublicIPv6` | `*bool` | no | `true` | Attach a public IPv6. |
+| `labels` | `map[string]string` | no | — | Extra hcloud labels on the Hetzner server (useful for cost attribution or firewall label-selectors) |
+| `userData` | `string` | no | — | Inline cloud-init / Talos machine config. Overridden by `userDataSecretRef` when both are set. |
+| `userDataSecretRef` | `object {namespace, name, key}` | no | — | Source `userData` from a Secret instead of inline. The Secret is read at server-create time; its value never appears in the NodeClass spec or git. Takes precedence over `userData`. |
 
-Status exposes `conditions` (`ImagesReady`, `NetworkReady`, `ResourcesReady`, aggregated into `Ready`) and `resolvedImages` (image ID per architecture).
+Status exposes `conditions` (`ImagesReady`, `NetworkReady`, `ResourcesReady`, `UserDataReady`, aggregated into `Ready`) and `resolvedImages` (image ID per architecture).
+
+## Examples
+
+Ready-to-apply examples live in the [`examples/`](examples/) directory.  Each
+file is multi-document YAML (NodeClass + NodePool in one file) with inline
+comments explaining every field.
+
+| File | Description |
+|------|-------------|
+| [`examples/talos-nodeclass.yaml`](examples/talos-nodeclass.yaml) | Talos Linux, private-network cluster, image pinned via label selector, machineconfig from a Secret |
+| [`examples/ubuntu-nodeclass.yaml`](examples/ubuntu-nodeclass.yaml) | Ubuntu 24.04, kubeadm join via inline cloud-init `userData` |
+| [`examples/nodepool-multiarch.yaml`](examples/nodepool-multiarch.yaml) | Multi-arch pattern: one NodeClass, two NodePools (amd64 CCX + arm64 CAX) |
+
+### Bootstrap guides
+
+- [Talos bootstrap guide](docs/talos-bootstrap.md) — obtaining the worker machineconfig, pinning images, and verifying node join.
+- [Ubuntu bootstrap recipe](docs/ubuntu-bootstrap.md) — kubeadm join via cloud-init, keeping tokens out of git, trade-offs vs Talos.
 
 ## Configuration
 
