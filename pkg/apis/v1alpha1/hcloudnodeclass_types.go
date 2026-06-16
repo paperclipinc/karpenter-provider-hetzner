@@ -41,6 +41,22 @@ type HCloudNodeClassSpec struct {
 
 	// +optional
 	UserData string `json:"userData,omitempty"`
+
+	// BootstrapRef sources the server userData from a Secret instead of inline
+	// userData. Required for Talos, whose machineconfig contains cluster secrets.
+	// When set, it takes precedence over UserData.
+	// +optional
+	BootstrapRef *BootstrapRef `json:"bootstrapRef,omitempty"`
+}
+
+// BootstrapRef references a Secret key holding the server userData (e.g. a Talos
+// worker machineconfig or a cloud-init document).
+type BootstrapRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	// +kubebuilder:default=userData
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 type ImageSelector struct {

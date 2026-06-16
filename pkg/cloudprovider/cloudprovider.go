@@ -136,6 +136,12 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	// Collect node pool name from NodeClaim labels (may be empty).
 	nodePoolName := nodeClaim.Labels[karpv1.NodePoolLabelKey]
 
+	// Resolve userData: BootstrapRef (Secret) takes precedence over inline UserData.
+	userData, err := resolveUserData(ctx, cp.kubeClient, nodeClass)
+	if err != nil {
+		return nil, fmt.Errorf("resolving user data: %w", err)
+	}
+
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
 		Name:        nodeClaim.Name,
@@ -146,7 +152,7 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		FirewallIDs: nodeClass.Spec.FirewallIDs,
 		SSHKeyIDs:   nodeClass.Spec.SSHKeyIDs,
 		Labels:      nodeClass.Spec.Labels,
-		UserData:    nodeClass.Spec.UserData,
+		UserData:    userData,
 		NodeClaim:   nodeClaim.Name,
 		NodePool:    nodePoolName,
 	})
