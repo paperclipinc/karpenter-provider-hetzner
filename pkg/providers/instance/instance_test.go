@@ -340,3 +340,188 @@ func TestCreate_WaitsForNextActions(t *testing.T) {
 		t.Errorf("expected 2 next-actions waited, got %d", waiter.waited)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// mockPlacementGroupClient and placement group tests
+// ---------------------------------------------------------------------------
+
+type mockPlacementGroupClient struct {
+	groups    []*hcloud.PlacementGroup
+	nextID    int64
+	createErr error
+	// recorded arguments for assertions
+	lastListOpts   hcloud.PlacementGroupListOpts
+	lastCreateOpts hcloud.PlacementGroupCreateOpts
+	createCalls    int
+}
+
+func newMockPlacementGroupClient() *mockPlacementGroupClient {
+	return &mockPlacementGroupClient{nextID: 200}
+}
+
+func (m *mockPlacementGroupClient) AllWithOpts(_ context.Context, opts hcloud.PlacementGroupListOpts) ([]*hcloud.PlacementGroup, error) {
+	m.lastListOpts = opts
+	var result []*hcloud.PlacementGroup
+	for _, pg := range m.groups {
+		if opts.Name != "" && pg.Name != opts.Name {
+			continue
+		}
+		if opts.Type != "" && pg.Type != opts.Type {
+			continue
+		}
+		result = append(result, pg)
+	}
+	return result, nil
+}
+
+func (m *mockPlacementGroupClient) Create(_ context.Context, opts hcloud.PlacementGroupCreateOpts) (hcloud.PlacementGroupCreateResult, *hcloud.Response, error) {
+	m.lastCreateOpts = opts
+	m.createCalls++
+	if m.createErr != nil {
+		return hcloud.PlacementGroupCreateResult{}, nil, m.createErr
+	}
+	id := m.nextID
+	m.nextID++
+	pg := &hcloud.PlacementGroup{ID: id, Name: opts.Name, Type: opts.Type}
+	m.groups = append(m.groups, pg)
+	return hcloud.PlacementGroupCreateResult{PlacementGroup: pg}, nil, nil
+}
+
+// TestCreate_SpreadStrategy_CreatesPG verifies that strategy "spread" (default)
+// causes a placement group to be created and assigned to the server.
+func TestCreate_SpreadStrategy_CreatesPG(t *testing.T) {
+	sc := newMockServerClient()
+	pgc := newMockPlacementGroupClient()
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name:                   "n",
+		ServerType:             "cx22",
+		Location:               "nbg1",
+		Image:                  &hcloud.Image{ID: 1},
+		NodePool:               "my-pool",
+		PlacementGroupStrategy: "spread",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A placement group should have been created.
+	if pgc.createCalls != 1 {
+		t.Errorf("expected 1 PG create call, got %d", pgc.createCalls)
+	}
+	if pgc.lastCreateOpts.Name != "karpenter-my-pool" {
+		t.Errorf("expected PG name %q, got %q", "karpenter-my-pool", pgc.lastCreateOpts.Name)
+	}
+	if pgc.lastCreateOpts.Type != hcloud.PlacementGroupTypeSpread {
+		t.Errorf("expected spread type, got %q", pgc.lastCreateOpts.Type)
+	}
+	// The server create opts must include the placement group.
+	if sc.lastOpts.PlacementGroup == nil {
+		t.Error("expected PlacementGroup to be set on server create opts")
+	}
+}
+
+// TestCreate_SpreadStrategy_EmptyStrategy_CreatesPG verifies that an empty
+// strategy (the kubebuilder default "spread") also creates a placement group.
+func TestCreate_SpreadStrategy_EmptyStrategy_CreatesPG(t *testing.T) {
+	sc := newMockServerClient()
+	pgc := newMockPlacementGroupClient()
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name:       "n",
+		ServerType: "cx22",
+		Location:   "nbg1",
+		Image:      &hcloud.Image{ID: 1},
+		NodePool:   "pool-a",
+		// PlacementGroupStrategy intentionally left empty -> treated as spread
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sc.lastOpts.PlacementGroup == nil {
+		t.Error("expected PlacementGroup to be set on server create opts when strategy is empty")
+	}
+}
+
+// TestCreate_NoneStrategy_NoPG verifies that strategy "none" does NOT create or
+// assign a placement group.
+func TestCreate_NoneStrategy_NoPG(t *testing.T) {
+	sc := newMockServerClient()
+	pgc := newMockPlacementGroupClient()
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name:                   "n",
+		ServerType:             "cx22",
+		Location:               "nbg1",
+		Image:                  &hcloud.Image{ID: 1},
+		NodePool:               "my-pool",
+		PlacementGroupStrategy: "none",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pgc.createCalls != 0 {
+		t.Errorf("expected 0 PG create calls for strategy=none, got %d", pgc.createCalls)
+	}
+	if sc.lastOpts.PlacementGroup != nil {
+		t.Error("expected no PlacementGroup on server create opts when strategy=none")
+	}
+}
+
+// TestCreate_SpreadStrategy_ReusesPG verifies that when a placement group with
+// the expected name already exists, Create reuses it without calling create.
+func TestCreate_SpreadStrategy_ReusesPG(t *testing.T) {
+	sc := newMockServerClient()
+	pgc := newMockPlacementGroupClient()
+	// Pre-seed an existing placement group with the expected name.
+	existingID := int64(999)
+	pgc.groups = []*hcloud.PlacementGroup{
+		{ID: existingID, Name: "karpenter-my-pool", Type: hcloud.PlacementGroupTypeSpread},
+	}
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name:                   "n",
+		ServerType:             "cx22",
+		Location:               "nbg1",
+		Image:                  &hcloud.Image{ID: 1},
+		NodePool:               "my-pool",
+		PlacementGroupStrategy: "spread",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should NOT have called create.
+	if pgc.createCalls != 0 {
+		t.Errorf("expected 0 PG create calls (reuse), got %d", pgc.createCalls)
+	}
+	// Should use the existing PG's ID.
+	if sc.lastOpts.PlacementGroup == nil || sc.lastOpts.PlacementGroup.ID != existingID {
+		t.Errorf("expected existing PG ID %d, got %v", existingID, sc.lastOpts.PlacementGroup)
+	}
+}
+
+// TestCreate_SpreadStrategy_EmptyNodePool verifies the fallback PG name when
+// NodePool is empty.
+func TestCreate_SpreadStrategy_EmptyNodePool(t *testing.T) {
+	sc := newMockServerClient()
+	pgc := newMockPlacementGroupClient()
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+
+	_, err := p.Create(context.Background(), CreateOpts{
+		Name:                   "n",
+		ServerType:             "cx22",
+		Location:               "nbg1",
+		Image:                  &hcloud.Image{ID: 1},
+		NodePool:               "", // empty
+		PlacementGroupStrategy: "spread",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pgc.lastCreateOpts.Name != "karpenter" {
+		t.Errorf("expected PG name %q for empty NodePool, got %q", "karpenter", pgc.lastCreateOpts.Name)
+	}
+}

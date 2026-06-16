@@ -151,19 +151,20 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Create the server.
 	server, err := cp.instanceProvider.Create(ctx, instance.CreateOpts{
-		Name:             nodeClaim.Name,
-		ServerType:       selected.Name,
-		Location:         location,
-		Image:            image,
-		NetworkID:        nodeClass.Spec.NetworkID,
-		FirewallIDs:      nodeClass.Spec.FirewallIDs,
-		SSHKeyIDs:        nodeClass.Spec.SSHKeyIDs,
-		Labels:           nodeClass.Spec.Labels,
-		UserData:         userData,
-		NodeClaim:        nodeClaim.Name,
-		NodePool:         nodePoolName,
-		EnablePublicIPv4: nodeClass.Spec.PublicIPv4Enabled(),
-		EnablePublicIPv6: nodeClass.Spec.PublicIPv6Enabled(),
+		Name:                   nodeClaim.Name,
+		ServerType:             selected.Name,
+		Location:               location,
+		Image:                  image,
+		NetworkID:              nodeClass.Spec.NetworkID,
+		FirewallIDs:            nodeClass.Spec.FirewallIDs,
+		SSHKeyIDs:              nodeClass.Spec.SSHKeyIDs,
+		Labels:                 nodeClass.Spec.Labels,
+		UserData:               userData,
+		NodeClaim:              nodeClaim.Name,
+		NodePool:               nodePoolName,
+		PlacementGroupStrategy: nodeClass.Spec.PlacementGroupStrategy,
+		EnablePublicIPv4:       nodeClass.Spec.PublicIPv4Enabled(),
+		EnablePublicIPv6:       nodeClass.Spec.PublicIPv6Enabled(),
 	})
 	if err != nil {
 		if karpcp.IsInsufficientCapacityError(err) {
