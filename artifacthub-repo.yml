@@ -7,7 +7,7 @@
 # repositoryID is issued by Artifact Hub when the repo is first registered at
 # https://artifacthub.io/control-panel/repositories (add repo -> Helm charts ->
 # OCI registry URL above). Paste the generated ID here, then re-push this file.
-repositoryID: ""
+repositoryID: b74823b2-1844-44eb-ab1b-5517fb941926
 owners:
   - name: paperclip.inc
     email: ops@paperclip.inc
