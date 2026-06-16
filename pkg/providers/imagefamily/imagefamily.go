@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
 )
@@ -48,15 +49,27 @@ func NewProvider(client ImageClient) *Provider {
 // Resolve returns the best matching image for the given selector and architecture.
 // Supported families: "ubuntu", "talos".
 func (p *Provider) Resolve(ctx context.Context, selector v1alpha1.ImageSelector, arch hcloud.Architecture) (*hcloud.Image, error) {
+	log := logf.FromContext(ctx)
 	ls := labelSelectorString(selector.Selector)
+	var img *hcloud.Image
+	var err error
 	switch strings.ToLower(selector.Family) {
 	case "ubuntu":
-		return p.resolveUbuntu(ctx, selector.Version, arch, ls)
+		img, err = p.resolveUbuntu(ctx, selector.Version, arch, ls)
 	case "talos":
-		return p.resolveTalos(ctx, selector.Version, arch, ls)
+		img, err = p.resolveTalos(ctx, selector.Version, arch, ls)
 	default:
 		return nil, fmt.Errorf("unsupported image family %q: must be one of ubuntu, talos", selector.Family)
 	}
+	if err != nil {
+		return nil, err
+	}
+	log.V(1).Info("resolved image",
+		"family", selector.Family,
+		"arch", string(arch),
+		"imageID", img.ID,
+	)
+	return img, nil
 }
 
 // resolveUbuntu finds a system image whose description contains "ubuntu" and optionally the given version.
