@@ -30,6 +30,7 @@ const (
 	DriftNetwork    karpcp.DriftReason = "NetworkDrift"
 	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
 	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
+	DriftLocation   karpcp.DriftReason = "LocationDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -311,6 +312,23 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
 		server.ServerType != nil && server.ServerType.Name != want {
 		return DriftServerType, nil
+	}
+
+	// Location drift: the server's datacenter location must be in the NodeClass
+	// Locations list. Guards nil Datacenter/Location pointers defensively.
+	if len(nodeClass.Spec.Locations) > 0 &&
+		server.Datacenter != nil && server.Datacenter.Location != nil {
+		serverLocation := server.Datacenter.Location.Name
+		inAllowed := false
+		for _, loc := range nodeClass.Spec.Locations {
+			if loc == serverLocation {
+				inAllowed = true
+				break
+			}
+		}
+		if !inAllowed {
+			return DriftLocation, nil
+		}
 	}
 
 	// SSH-key and user-data drift are intentionally not checked: Hetzner does not
