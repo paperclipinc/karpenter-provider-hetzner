@@ -1,0 +1,151 @@
+# Talos Linux NodeClass + NodePool — private-network cluster
+#
+# Prerequisites:
+#   - Hetzner private network created (note the numeric ID).
+#   - Talos images uploaded to your Hetzner project with the label
+#     caph-image-name matching the value below. See docs/talos-bootstrap.md.
+#   - Worker machineconfig stored in a Secret (see bootstrap Secret below).
+#
+# Apply with:
+#   kubectl apply -f examples/talos-nodeclass.yaml
+#
+# NEVER commit real secret data to git.  The bootstrap Secret shown at the
+# bottom of this file is a commented template only.
+
+apiVersion: karpenter.hetzner.cloud/v1alpha1
+kind: HCloudNodeClass
+metadata:
+  name: talos-default
+spec:
+  # locations: at least one Hetzner datacenter region.
+  # Karpenter will spread across them; list all regions you want to use.
+  locations:
+    - nbg1
+    - fsn1
+    - hel1
+
+  imageSelector:
+    family: talos
+    # version is an optional substring match against the image description.
+    # Prefer imageSelector.selector (below) to pin an exact image instead of
+    # relying on substring matching, which may match multiple images.
+    version: "v1.9"
+    # selector is an hcloud label filter applied when listing images.
+    # Use it to pin the exact snapshot that has your Talos version + baked
+    # system extensions (e.g. gVisor, NVIDIA drivers).
+    # ADJUST: replace the value with the caph-image-name label on your image.
+    selector:
+      caph-image-name: "talos-v1.9.5-gvisor"
+
+  # networkID: numeric ID of the Hetzner private network.
+  # ADJUST: replace with your network ID (find it in the Hetzner console or
+  # with `hcloud network list`).
+  networkID: 123456
+
+  # firewallIDs: optional list of Hetzner firewall IDs to attach to each node.
+  # ADJUST or remove if you manage firewall rules elsewhere.
+  firewallIDs:
+    - 987654
+
+  # sshKeyIDs: optional SSH key IDs for emergency console access.
+  # Talos does not use SSH at runtime, but having a key registered can help
+  # with rescue mode operations.
+  # ADJUST or remove.
+  sshKeyIDs:
+    - 42
+
+  # placementGroupStrategy: spread (default) distributes nodes across
+  # physical hosts to reduce correlated failure risk.
+  placementGroupStrategy: spread
+
+  # labels: extra hcloud server labels applied to every node this class
+  # creates.  Useful for cost attribution or hcloud firewall label-selectors.
+  labels:
+    managed-by: karpenter
+    env: production
+
+  # Private-network clusters do not need public IPs.
+  # Disabling both saves the primary-IPv4 charge (billed per server).
+  enablePublicIPv4: false
+  enablePublicIPv6: false
+
+  # userDataSecretRef: source the Talos worker machineconfig from a Secret.
+  # The Secret is read at server-create time and never stored in git or in
+  # the NodeClass spec.
+  # See docs/talos-bootstrap.md for how to create this Secret.
+  userDataSecretRef:
+    namespace: kube-system
+    name: talos-worker-machineconfig
+    key: worker.yaml
+
+---
+# NodePool — constrains what Karpenter may provision for this NodeClass.
+# Karpenter picks the cheapest server type that fits the pending pod's
+# resource request from among the types that satisfy all requirements.
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: talos-amd64
+spec:
+  template:
+    spec:
+      # nodeClassRef: must point at the HCloudNodeClass above.
+      nodeClassRef:
+        group: karpenter.hetzner.cloud
+        kind: HCloudNodeClass
+        name: talos-default
+
+      requirements:
+        # Constrain to x86-64 nodes.  Talos images are arch-specific; make
+        # sure your imageSelector.selector value matches this architecture.
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+
+        # Constrain to dedicated-CPU families for production workloads.
+        # Remove or adjust to allow shared-CPU types (cpx, cax) as well.
+        - key: karpenter.hetzner.cloud/server-family
+          operator: In
+          values: [ccx]
+
+        # Spread across locations declared in the NodeClass.
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [nbg1, fsn1, hel1]
+
+      # Optional: prevent Karpenter from consolidating nodes for 10 minutes
+      # after they are created, giving pods time to warm up.
+      # startupTaints: []
+
+  # Hard ceiling on resources Karpenter may provision for this pool.
+  limits:
+    cpu: "200"
+    memory: 800Gi
+
+  disruption:
+    # WhenEmptyOrUnderutilized consolidates underused nodes automatically.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+
+---
+# Bootstrap Secret — TEMPLATE ONLY.
+# DO NOT commit real machineconfig data.
+# See docs/talos-bootstrap.md for how to generate and store this Secret.
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: talos-worker-machineconfig
+#   namespace: kube-system
+# type: Opaque
+# stringData:
+#   # Obtain via:
+#   #   talosctl gen config <cluster-name> https://<control-plane-ip>:6443 \
+#   #     --output-types worker --output /tmp/worker.yaml
+#   # Then:
+#   #   kubectl create secret generic talos-worker-machineconfig \
+#   #     --namespace kube-system \
+#   #     --from-file=worker.yaml=/tmp/worker.yaml
+#   worker.yaml: |
+#     # <paste machineconfig here — keep out of git>

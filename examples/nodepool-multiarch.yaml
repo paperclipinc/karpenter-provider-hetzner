@@ -1,0 +1,141 @@
+# Multi-arch NodePool pattern — amd64 + arm64 from a single NodeClass
+#
+# How it works:
+#   - One HCloudNodeClass covers both architectures.  imageSelector.selector
+#     must match images for BOTH amd64 and arm64; the provider resolves one
+#     image ID per architecture and guards against provisioning a node whose
+#     image arch does not match the selected server type.
+#   - TWO NodePools — one per arch — let Karpenter track capacity limits
+#     and disruption budgets independently for each architecture.
+#   - Pods select which arch they run on via nodeAffinity or nodeSelector
+#     on the standard kubernetes.io/arch label.  Pods with no arch preference
+#     land on whichever pool has spare capacity first.
+#
+# Hetzner server families:
+#   amd64: cx (entry), cpx (shared x86), ccx (dedicated x86)
+#   arm64: cax (shared ARM — typically best price/vCPU)
+#
+# Image requirement:
+#   Your Talos (or Ubuntu) images must be uploaded for BOTH architectures.
+#   Use imageSelector.selector to pin a label that is present on both the
+#   x86 and ARM snapshots, e.g. {"caph-image-name": "talos-v1.9.5-gvisor"}
+#   where both images carry that label.  If only one arch has an image with
+#   the selector, the provider will report ImagesReady=False.
+
+apiVersion: karpenter.hetzner.cloud/v1alpha1
+kind: HCloudNodeClass
+metadata:
+  name: talos-multiarch
+spec:
+  locations:
+    - nbg1
+    - fsn1
+    - hel1
+
+  imageSelector:
+    family: talos
+    # ADJUST: this label must be present on BOTH your amd64 and arm64 images.
+    selector:
+      caph-image-name: "talos-v1.9.5-gvisor"
+
+  # ADJUST: replace with your Hetzner private network ID.
+  networkID: 123456
+
+  firewallIDs:
+    - 987654
+
+  placementGroupStrategy: spread
+
+  labels:
+    managed-by: karpenter
+
+  enablePublicIPv4: false
+  enablePublicIPv6: false
+
+  userDataSecretRef:
+    namespace: kube-system
+    name: talos-worker-machineconfig
+    key: worker.yaml
+
+---
+# NodePool: amd64 — x86-64 dedicated CPU (ccx) for latency-sensitive work.
+# Pods select this pool with:
+#   nodeSelector:
+#     kubernetes.io/arch: amd64
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: talos-amd64
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.hetzner.cloud
+        kind: HCloudNodeClass
+        name: talos-multiarch
+
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+
+        # ccx = dedicated x86.  Use cpx for shared x86 at lower cost.
+        - key: karpenter.hetzner.cloud/server-family
+          operator: In
+          values: [ccx]
+
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [nbg1, fsn1, hel1]
+
+  limits:
+    cpu: "200"
+    memory: 800Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+
+---
+# NodePool: arm64 — Hetzner CAX (Ampere Altra) for throughput/cost workloads.
+# Pods select this pool with:
+#   nodeSelector:
+#     kubernetes.io/arch: arm64
+#
+# NOTE: ensure your container images are published as multi-arch manifests
+# (or separate arm64 tags) before sending pods to arm64 nodes.
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: talos-arm64
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.hetzner.cloud
+        kind: HCloudNodeClass
+        name: talos-multiarch
+
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [arm64]
+
+        # cax = Hetzner ARM (Ampere Altra) — shared CPU, best price/vCPU.
+        - key: karpenter.hetzner.cloud/server-family
+          operator: In
+          values: [cax]
+
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [nbg1, fsn1, hel1]
+
+  limits:
+    cpu: "200"
+    memory: 800Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s

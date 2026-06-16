@@ -1,0 +1,145 @@
+# Ubuntu NodeClass + NodePool — kubeadm join via inline cloud-init
+#
+# Prerequisites:
+#   - A running Kubernetes control plane reachable from new nodes.
+#   - A valid kubeadm join token + CA cert hash.  Generate with:
+#       kubeadm token create --print-join-command
+#   - The Hetzner private network ID and (optionally) firewall IDs.
+#
+# Apply with:
+#   kubectl apply -f examples/ubuntu-nodeclass.yaml
+#
+# Trade-offs vs Talos:
+#   - Simpler: no custom image needed; Karpenter resolves the latest Ubuntu
+#     image from Hetzner's public catalogue automatically.
+#   - The join token and CA hash appear inline in userData.  Rotate tokens
+#     frequently and consider userDataSecretRef to keep them out of git.
+#     See docs/ubuntu-bootstrap.md for details.
+
+apiVersion: karpenter.hetzner.cloud/v1alpha1
+kind: HCloudNodeClass
+metadata:
+  name: ubuntu-default
+spec:
+  locations:
+    - nbg1
+    - fsn1
+
+  imageSelector:
+    family: ubuntu
+    # version pins the Ubuntu release; omit to always get the newest.
+    # ADJUST: "22.04" or "24.04"
+    version: "24.04"
+
+  # networkID: numeric Hetzner private network ID.
+  # ADJUST: replace with your network ID.
+  networkID: 123456
+
+  # firewallIDs: optional.  ADJUST or remove.
+  firewallIDs:
+    - 987654
+
+  placementGroupStrategy: spread
+
+  labels:
+    managed-by: karpenter
+    env: production
+
+  # enablePublicIPv4: true keeps a public IP so nodes can reach the internet
+  # for apt and kubeadm image pulls.  Set false if you route egress through
+  # NAT or a private registry.
+  enablePublicIPv4: true
+  enablePublicIPv6: false
+
+  # userData: cloud-init script that installs containerd + kubeadm and joins
+  # the cluster.  Replace every <PLACEHOLDER> before applying.
+  #
+  # SECURITY NOTE: the join token carries cluster access.  Consider storing
+  # this blob in a Secret and referencing it via userDataSecretRef instead of
+  # committing it to git.  See docs/ubuntu-bootstrap.md.
+  userData: |
+    #cloud-config
+    package_update: true
+    packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+
+    runcmd:
+      # ---- kernel settings ----
+      - modprobe overlay
+      - modprobe br_netfilter
+      - |
+        cat <<EOF > /etc/sysctl.d/99-kubernetes.conf
+        net.bridge.bridge-nf-call-iptables  = 1
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.ipv4.ip_forward                 = 1
+        EOF
+      - sysctl --system
+
+      # ---- containerd ----
+      - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      - |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+      - apt-get update -y
+      - apt-get install -y containerd.io
+      - containerd config default > /etc/containerd/config.toml
+      - sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      - systemctl enable --now containerd
+
+      # ---- kubeadm / kubelet / kubectl ----
+      - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      - echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+      - apt-get update -y
+      - apt-get install -y kubelet kubeadm kubectl
+      - apt-mark hold kubelet kubeadm kubectl
+      - systemctl enable kubelet
+
+      # ---- join the cluster ----
+      # ADJUST: replace every <PLACEHOLDER> with real values.
+      # Obtain with: kubeadm token create --print-join-command
+      - |
+        kubeadm join <CONTROL_PLANE_ENDPOINT>:6443 \
+          --token <BOOTSTRAP_TOKEN> \
+          --discovery-token-ca-cert-hash sha256:<CA_CERT_HASH>
+
+---
+# NodePool for Ubuntu nodes — x86-64, shared-CPU (cpx family for cost).
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ubuntu-amd64
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.hetzner.cloud
+        kind: HCloudNodeClass
+        name: ubuntu-default
+
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+
+        # cpx: shared x86 — good baseline cost/performance for generic workloads.
+        # Add cax (ARM) or ccx (dedicated x86) as additional values if desired.
+        - key: karpenter.hetzner.cloud/server-family
+          operator: In
+          values: [cpx]
+
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [nbg1, fsn1]
+
+  limits:
+    cpu: "100"
+    memory: 400Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
