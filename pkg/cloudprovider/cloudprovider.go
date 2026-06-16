@@ -123,6 +123,12 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	if err != nil {
 		return nil, fmt.Errorf("resolving image: %w", err)
 	}
+	// Guard: never provision a server whose image architecture diverges from the
+	// architecture the NodeClaim requires. Fail loudly instead of booting a
+	// wrong-arch node that would silently fail to run scheduled workloads.
+	if image.Architecture != hcloudArch {
+		return nil, fmt.Errorf("resolved image %d has arch %q but nodeclaim requires %q", image.ID, image.Architecture, hcloudArch)
+	}
 
 	// Pick the first compatible offering to determine the location.
 	var location string

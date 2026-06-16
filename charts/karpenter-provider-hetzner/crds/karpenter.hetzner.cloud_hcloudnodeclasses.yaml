@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.19.0
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: hcloudnodeclasses.karpenter.hetzner.cloud
 spec:
   group: karpenter.hetzner.cloud
@@ -70,6 +70,14 @@ spec:
                     - talos
                     - ubuntu
                     type: string
+                  selector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Selector is an hcloud label selector applied when listing images, e.g.
+                      {"caph-image-name": "talos-v1.13.3-gvisor"}. Use it to pin the exact image
+                      (version plus baked extensions) instead of fuzzy description matching.
+                    type: object
                   version:
                     type: string
                 required:

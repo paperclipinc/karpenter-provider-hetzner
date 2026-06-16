@@ -86,6 +86,12 @@ type ImageSelector struct {
 
 	// +optional
 	Version string `json:"version,omitempty"`
+
+	// Selector is an hcloud label selector applied when listing images, e.g.
+	// {"caph-image-name": "talos-v1.13.3-gvisor"}. Use it to pin the exact image
+	// (version plus baked extensions) instead of fuzzy description matching.
+	// +optional
+	Selector map[string]string `json:"selector,omitempty"`
 }
 
 type ResolvedImage struct {
