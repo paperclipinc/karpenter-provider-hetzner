@@ -130,7 +130,7 @@ func buildCP(t *testing.T, nc *v1alpha1.HCloudNodeClass, server *hcloud.Server) 
 
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{server.ID: server}}
 	stc := &fakeServerTypeClient{}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
@@ -206,7 +206,7 @@ func buildCPWithTypes(t *testing.T, nc *v1alpha1.HCloudNodeClass, types []*hclou
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: types}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	typeProvider := instancetype.NewProvider(stc)
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
@@ -453,7 +453,7 @@ func TestCreate_UserDataFromSecret(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		instancetype.NewProvider(stc),
@@ -478,7 +478,7 @@ func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		instancetype.NewProvider(stc),
@@ -512,7 +512,7 @@ func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		instancetype.NewProvider(stc),
@@ -539,7 +539,7 @@ func TestCreate_UserDataSecretMissing(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04"}}}
+	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		instancetype.NewProvider(stc),
