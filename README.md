@@ -8,7 +8,12 @@ A [Karpenter](https://karpenter.sh) cloud provider for [Hetzner Cloud](https://w
 
 ## Status
 
-**Alpha.** The provider is correct and deployable, with unit and controller test coverage. End-to-end validation on a live cluster is in progress; treat it as alpha and pin a released image tag rather than `latest` in production.
+**Stable (v1.0.0).** The full CloudProvider surface is implemented with unit and
+controller test coverage, and the provision → join → drift → consolidation
+lifecycle is validated end-to-end against a live Talos cluster (happy, drift,
+consolidation, fallback, and invalid-nodeclass scenarios). Releases are
+multi-arch, cosign-signed, and ship SLSA provenance + an SBOM. Pin a released
+version tag in production.
 
 ## Features
 
