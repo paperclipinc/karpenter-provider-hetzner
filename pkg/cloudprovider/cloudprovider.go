@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
@@ -31,6 +32,7 @@ const (
 	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
 	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
 	DriftLocation   karpcp.DriftReason = "LocationDrift"
+	DriftLabels     karpcp.DriftReason = "LabelsDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -84,6 +86,7 @@ func (cp *CloudProvider) RepairPolicies() []karpcp.RepairPolicy {
 
 // Create provisions a new Hetzner server for the given NodeClaim.
 func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim) (*karpv1.NodeClaim, error) {
+	log := logf.FromContext(ctx)
 	nodeClass, err := cp.resolveNodeClass(ctx, nodeClaim.Spec.NodeClassRef)
 	if err != nil {
 		return nil, fmt.Errorf("resolving node class: %w", err)
@@ -118,6 +121,7 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	if arch == "arm64" {
 		hcloudArch = hcloud.ArchitectureARM
 	}
+	log.Info("selected instance type", "instanceType", selected.Name, "arch", arch)
 
 	// Resolve OS image.
 	image, err := cp.imageProvider.Resolve(ctx, nodeClass.Spec.ImageSelector, hcloudArch)
@@ -251,6 +255,7 @@ func (cp *CloudProvider) GetInstanceTypes(ctx context.Context, nodePool *karpv1.
 
 // IsDrifted determines whether the given NodeClaim has drifted from its desired state.
 func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeClaim) (karpcp.DriftReason, error) {
+	log := logf.FromContext(ctx)
 	nodeClass, err := cp.resolveNodeClass(ctx, nodeClaim.Spec.NodeClassRef)
 	if err != nil {
 		return "", fmt.Errorf("resolving node class: %w", err)
@@ -264,12 +269,19 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 		return "", nil
 	}
 
+	// logDrift emits a structured INFO log and returns the reason so callers can
+	// write: return logDrift(log, reason, providerID), nil
+	logDrift := func(reason karpcp.DriftReason, providerID string) karpcp.DriftReason {
+		log.Info("drift detected", "reason", string(reason), "providerID", providerID)
+		return reason
+	}
+
 	// Check image drift: compare the resolved image ID recorded in NodeClaim status against
 	// the current server image.
 	if nodeClaim.Status.ImageID != "" && server.Image != nil {
 		currentImageID := strconv.FormatInt(server.Image.ID, 10)
 		if nodeClaim.Status.ImageID != currentImageID {
-			return DriftImage, nil
+			return logDrift(DriftImage, nodeClaim.Status.ProviderID), nil
 		}
 	}
 
@@ -283,7 +295,7 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 			}
 		}
 		if !attached {
-			return DriftNetwork, nil
+			return logDrift(DriftNetwork, nodeClaim.Status.ProviderID), nil
 		}
 	}
 
@@ -300,7 +312,7 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 		}
 		for _, want := range nodeClass.Spec.FirewallIDs {
 			if !attached[want] {
-				return DriftFirewall, nil
+				return logDrift(DriftFirewall, nodeClaim.Status.ProviderID), nil
 			}
 		}
 	}
@@ -311,7 +323,7 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 	// reporting false drift.
 	if want := nodeClaim.Labels[corev1.LabelInstanceTypeStable]; want != "" &&
 		server.ServerType != nil && server.ServerType.Name != want {
-		return DriftServerType, nil
+		return logDrift(DriftServerType, nodeClaim.Status.ProviderID), nil
 	}
 
 	// Location drift: the server's location must be in the NodeClass Locations
@@ -326,7 +338,19 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 			}
 		}
 		if !inAllowed {
-			return DriftLocation, nil
+			return logDrift(DriftLocation, nodeClaim.Status.ProviderID), nil
+		}
+	}
+
+	// Label drift: every key/value in NodeClass spec.labels must be present and
+	// matching on the server. Extra labels on the server (karpenter management,
+	// offering labels, etc.) are permitted and do not count as drift. Empty/nil
+	// spec labels means nothing is required — skip the check.
+	if len(nodeClass.Spec.Labels) > 0 {
+		for k, want := range nodeClass.Spec.Labels {
+			if got, ok := server.Labels[k]; !ok || got != want {
+				return logDrift(DriftLabels, nodeClaim.Status.ProviderID), nil
+			}
 		}
 	}
 
