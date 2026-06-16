@@ -192,7 +192,7 @@ func TestResolveTalos_LabelSelectorForwarded(t *testing.T) {
 	if _, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := fc.lastOpts.ListOpts.LabelSelector; got != "caph-image-name=talos-v1.13.3-gvisor" {
+	if got := fc.lastOpts.LabelSelector; got != "caph-image-name=talos-v1.13.3-gvisor" {
 		t.Fatalf("label selector not forwarded: got %q", got)
 	}
 }
@@ -206,7 +206,7 @@ func TestResolveUbuntu_LabelSelectorForwarded(t *testing.T) {
 	if _, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := fc.lastOpts.ListOpts.LabelSelector; got != "role=worker" {
+	if got := fc.lastOpts.LabelSelector; got != "role=worker" {
 		t.Fatalf("label selector not forwarded: got %q", got)
 	}
 }
