@@ -7,14 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-16
+
+First stable release: a complete CloudProvider implementation with full drift
+detection, observability, supply-chain attestations, and adoption docs.
+
 ### Added
-- Image label selector: `HCloudNodeClass.spec.imageSelector.selector` allows filtering Hetzner images by arbitrary labels, replacing the previous name-only approach (#23).
-- Wrong-arch guard: provisioning is now rejected when the resolved image architecture does not match the requested node architecture (#23).
-- Placement group creation and assignment: the provider now creates and assigns Hetzner placement groups to provisioned servers (#24).
-- Location drift detection: servers whose Hetzner location no longer matches the `NodeClass` spec are detected and disrupted (#24).
-- Label drift detection: servers whose Hetzner server-type labels diverge from the desired state are flagged and reconciled (#26).
-- Structured logging: all log output now uses structured `slog` key-value fields for easier filtering and ingestion (#26).
-- `seccompProfile: RuntimeDefault` on the controller `Deployment` for reduced syscall attack surface (#26).
+- Image label selector: `HCloudNodeClass.spec.imageSelector.selector` filters Hetzner images by arbitrary labels, so you can pin the exact image (version plus baked extensions, e.g. a gVisor-Talos snapshot) instead of fuzzy description matching (#23).
+- Wrong-arch guard: provisioning is rejected when the resolved image architecture does not match the architecture the NodeClaim requires (#23).
+- Placement group creation and assignment: `placementGroupStrategy: spread` now actually creates/assigns a cluster-scoped Hetzner placement group (previously declared but a no-op) (#24).
+- Location drift detection: servers whose Hetzner location is no longer in the NodeClass `locations` are flagged as drifted (#24).
+- Label drift detection: servers whose labels no longer cover the NodeClass `labels` are flagged as drifted (#26).
+- Structured logging across provider operations (server create/delete, image resolution, drift) via the controller-runtime contextual logger (#26).
+- `seccompProfile: RuntimeDefault` on the controller pod for PSS `restricted` compliance (#26).
+- Prometheus metrics (`karpenter_hetzner_*`: server create/delete results and duration, hcloud API calls, drift detections, instance-type cache hits/misses) plus a Helm `ServiceMonitor` (#29).
+- Warning Events from the nodeclass controller on every NotReady path, so `kubectl describe hcloudnodeclass` explains why a class is not Ready (#29).
+- Examples (`talos-nodeclass`, `ubuntu-nodeclass`, `nodepool-multiarch`) and Talos/Ubuntu bootstrap guides (#28).
 
 ### Security
 - Cosign keyless signing of the release image using GitHub OIDC (no long-lived keys).
