@@ -32,6 +32,7 @@ const (
 	DriftFirewall   karpcp.DriftReason = "FirewallDrift"
 	DriftServerType karpcp.DriftReason = "ServerTypeDrift"
 	DriftLocation   karpcp.DriftReason = "LocationDrift"
+	DriftLabels     karpcp.DriftReason = "LabelsDrift"
 )
 
 // CloudProvider implements the Karpenter CloudProvider interface for Hetzner Cloud.
@@ -338,6 +339,18 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 		}
 		if !inAllowed {
 			return logDrift(DriftLocation, nodeClaim.Status.ProviderID), nil
+		}
+	}
+
+	// Label drift: every key/value in NodeClass spec.labels must be present and
+	// matching on the server. Extra labels on the server (karpenter management,
+	// offering labels, etc.) are permitted and do not count as drift. Empty/nil
+	// spec labels means nothing is required — skip the check.
+	if len(nodeClass.Spec.Labels) > 0 {
+		for k, want := range nodeClass.Spec.Labels {
+			if got, ok := server.Labels[k]; !ok || got != want {
+				return logDrift(DriftLabels, nodeClaim.Status.ProviderID), nil
+			}
 		}
 	}
 

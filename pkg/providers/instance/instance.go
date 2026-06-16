@@ -33,10 +33,10 @@ type ActionWaiter interface {
 
 // Provider wraps hcloud server CRUD operations for Karpenter.
 type Provider struct {
-	client         ServerClient
-	pgClient       PlacementGroupClient
-	waiter         ActionWaiter
-	clusterName    string
+	client      ServerClient
+	pgClient    PlacementGroupClient
+	waiter      ActionWaiter
+	clusterName string
 }
 
 // NewProvider returns a Provider that does NOT wait for hcloud actions to

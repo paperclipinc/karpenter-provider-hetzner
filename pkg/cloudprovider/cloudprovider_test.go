@@ -640,3 +640,63 @@ func TestIsDrifted_Location_NilLocation_NoDrift(t *testing.T) {
 		t.Errorf("expected no drift for nil Location, got %q", reason)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Label drift tests (B3)
+// ---------------------------------------------------------------------------
+
+// TestIsDrifted_Labels_Missing verifies that when NodeClass spec.labels contains
+// a key that is absent from the server labels, DriftLabels is returned.
+func TestIsDrifted_Labels_Missing(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.Labels = map[string]string{"env": "prod"}
+	server := baselineServer()
+	// server has no labels at all → "env" key is missing
+	server.Labels = map[string]string{}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != cloudprovider.DriftLabels {
+		t.Errorf("want DriftLabels, got %q", reason)
+	}
+}
+
+// TestIsDrifted_Labels_Match verifies that when all NodeClass spec.labels are
+// present and matching on the server, no drift is reported.
+func TestIsDrifted_Labels_Match(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Spec.Labels = map[string]string{"env": "prod"}
+	server := baselineServer()
+	// server has the required label plus additional management labels (subset rule)
+	server.Labels = map[string]string{
+		"env":                     "prod",
+		"karpenter.sh/managed-by": "karpenter",
+	}
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Errorf("expected no drift when spec labels present+matching, got %q", reason)
+	}
+}
+
+// TestIsDrifted_Labels_Empty verifies that when NodeClass spec.labels is empty
+// (nil), the label check is skipped and no drift is reported.
+func TestIsDrifted_Labels_Empty(t *testing.T) {
+	nc := baselineNodeClass()
+	// Spec.Labels is nil / not set — no requirement
+	server := baselineServer()
+	server.Labels = map[string]string{} // server has no labels either
+	cp, nodeClaim := buildCP(t, nc, server)
+	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Errorf("expected no drift for empty spec labels, got %q", reason)
+	}
+}
