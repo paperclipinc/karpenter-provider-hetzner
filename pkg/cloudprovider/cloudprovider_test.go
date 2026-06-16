@@ -598,7 +598,7 @@ func TestIsDrifted_Location(t *testing.T) {
 	nc := baselineNodeClass() // Locations: ["nbg1"]
 	server := baselineServer()
 	// Server is in "hel1" which is not in the NodeClass locations.
-	server.Datacenter = &hcloud.Datacenter{Location: &hcloud.Location{Name: "hel1"}}
+	server.Location = &hcloud.Location{Name: "hel1"}
 	cp, nodeClaim := buildCP(t, nc, server)
 	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
 	if err != nil {
@@ -614,7 +614,7 @@ func TestIsDrifted_Location(t *testing.T) {
 func TestIsDrifted_LocationInList_NoDrift(t *testing.T) {
 	nc := baselineNodeClass() // Locations: ["nbg1"]
 	server := baselineServer()
-	server.Datacenter = &hcloud.Datacenter{Location: &hcloud.Location{Name: "nbg1"}}
+	server.Location = &hcloud.Location{Name: "nbg1"}
 	cp, nodeClaim := buildCP(t, nc, server)
 	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
 	if err != nil {
@@ -625,18 +625,18 @@ func TestIsDrifted_LocationInList_NoDrift(t *testing.T) {
 	}
 }
 
-// TestIsDrifted_Location_NilDatacenter_NoDrift verifies that a server with a
-// nil Datacenter (e.g. mid-provisioning) does not report location drift.
-func TestIsDrifted_Location_NilDatacenter_NoDrift(t *testing.T) {
+// TestIsDrifted_Location_NilLocation_NoDrift verifies that a server with a nil
+// Location (e.g. mid-provisioning) does not report location drift.
+func TestIsDrifted_Location_NilLocation_NoDrift(t *testing.T) {
 	nc := baselineNodeClass()
 	server := baselineServer()
-	server.Datacenter = nil // nil datacenter -> guard should skip the check
+	server.Location = nil // nil location -> guard should skip the check
 	cp, nodeClaim := buildCP(t, nc, server)
 	reason, err := cp.IsDrifted(context.Background(), nodeClaim)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reason != "" {
-		t.Errorf("expected no drift for nil Datacenter, got %q", reason)
+		t.Errorf("expected no drift for nil Location, got %q", reason)
 	}
 }

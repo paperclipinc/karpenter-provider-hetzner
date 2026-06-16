@@ -314,11 +314,10 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 		return DriftServerType, nil
 	}
 
-	// Location drift: the server's datacenter location must be in the NodeClass
-	// Locations list. Guards nil Datacenter/Location pointers defensively.
-	if len(nodeClass.Spec.Locations) > 0 &&
-		server.Datacenter != nil && server.Datacenter.Location != nil {
-		serverLocation := server.Datacenter.Location.Name
+	// Location drift: the server's location must be in the NodeClass Locations
+	// list. Guards a nil Location pointer defensively (e.g. mid-provisioning).
+	if len(nodeClass.Spec.Locations) > 0 && server.Location != nil {
+		serverLocation := server.Location.Name
 		inAllowed := false
 		for _, loc := range nodeClass.Spec.Locations {
 			if loc == serverLocation {
