@@ -4,3 +4,26 @@ description: Karpenter cloud provider for Hetzner Cloud
 type: application
 version: 1.0.0
 appVersion: "1.0.0"
+# home points at paperclip.inc (the project's canonical page) so listing
+# "Homepage" links drive backlinks to the domain; GitHub stays as source.
+home: https://paperclip.inc/karpenter-hetzner
+sources:
+  - https://github.com/paperclipinc/karpenter-provider-hetzner
+keywords:
+  - karpenter
+  - hetzner
+  - autoscaling
+  - node-provisioning
+maintainers:
+  - name: paperclip.inc
+    url: https://paperclip.inc
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Homepage
+      url: https://paperclip.inc/karpenter-hetzner
+    - name: source
+      url: https://github.com/paperclipinc/karpenter-provider-hetzner
+    - name: Talos bootstrap guide
+      url: https://github.com/paperclipinc/karpenter-provider-hetzner/blob/main/docs/talos-bootstrap.md
+  artifacthub.io/category: integration-delivery
