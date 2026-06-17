@@ -4,7 +4,7 @@ description: Karpenter cloud provider for Hetzner Cloud
 type: application
 version: 1.0.0
 appVersion: "1.0.0"
-# home points at paperclip.inc (the project's canonical page) so listing
+# home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
 home: https://paperclip.inc/karpenter-hetzner
 sources:
@@ -15,7 +15,7 @@ keywords:
   - autoscaling
   - node-provisioning
 maintainers:
-  - name: paperclip.inc
+  - name: Paperclip.inc
     url: https://paperclip.inc
 annotations:
   artifacthub.io/license: Apache-2.0
