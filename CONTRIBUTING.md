@@ -22,7 +22,7 @@ CI runs `make test`, `golangci-lint`, `make generate-verify` (fails if generated
 
 ## Code generation
 
-The `HCloudNodeClass` CRD and `zz_generated.deepcopy.go` are generated from the API types in `pkg/apis/v1alpha1` by `controller-gen`. If you change those types, run `make generate` and commit the regenerated files. CI will fail if they are out of date.
+The `HCloudNodeClass` CRD and `zz_generated.deepcopy.go` are generated from the API types in `pkg/apis/v1` by `controller-gen`. If you change those types, run `make generate` and commit the regenerated files. CI will fail if they are out of date.
 
 ## Testing conventions
 

@@ -74,7 +74,7 @@ The CRD ships in the chart's `crds/` directory and is installed automatically by
 Create an `HCloudNodeClass` describing how nodes are built, and a `NodePool` describing what Karpenter may provision:
 
 ```yaml
-apiVersion: karpenter.hetzner.cloud/v1alpha1
+apiVersion: karpenter.hetzner.cloud/v1
 kind: HCloudNodeClass
 metadata:
   name: default

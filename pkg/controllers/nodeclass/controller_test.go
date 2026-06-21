@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 )
 
@@ -58,19 +58,19 @@ func (f amd64OnlyImages) AllWithOpts(_ context.Context, opts hcloud.ImageListOpt
 	return nil, nil
 }
 
-func newNodeClass() *v1alpha1.HCloudNodeClass {
-	return &v1alpha1.HCloudNodeClass{
+func newNodeClass() *apiv1.HCloudNodeClass {
+	return &apiv1.HCloudNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
-		Spec: v1alpha1.HCloudNodeClassSpec{
+		Spec: apiv1.HCloudNodeClassSpec{
 			Locations:     []string{"nbg1"},
 			NetworkID:     1,
-			ImageSelector: v1alpha1.ImageSelector{Family: "ubuntu"},
+			ImageSelector: apiv1.ImageSelector{Family: "ubuntu"},
 		},
 	}
 }
 
 func TestReconcile_SetsReadyWhenValid(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
 		WithObjects(nc).WithStatusSubresource(nc).Build()
@@ -82,11 +82,11 @@ func TestReconcile_SetsReadyWhenValid(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.StatusConditions().Get(v1alpha1.ConditionTypeNetworkReady).IsTrue() {
+	if !got.StatusConditions().Get(apiv1.ConditionTypeNetworkReady).IsTrue() {
 		t.Error("NetworkReady should be true")
 	}
 	if len(got.Status.ResolvedImages) == 0 {
@@ -103,7 +103,7 @@ func TestReconcile_SetsReadyWhenValid(t *testing.T) {
 }
 
 func TestReconcile_SingleArchImageIsReady(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
 		WithObjects(nc).WithStatusSubresource(nc).Build()
@@ -115,11 +115,11 @@ func TestReconcile_SingleArchImageIsReady(t *testing.T) {
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.StatusConditions().Get(v1alpha1.ConditionTypeImagesReady).IsTrue() {
+	if !got.StatusConditions().Get(apiv1.ConditionTypeImagesReady).IsTrue() {
 		t.Error("ImagesReady should be true when at least one arch resolves")
 	}
 	if !got.StatusConditions().Root().IsTrue() {
@@ -131,7 +131,7 @@ func TestReconcile_SingleArchImageIsReady(t *testing.T) {
 }
 
 func TestReconcile_ImageResolutionFails(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
 		WithObjects(nc).WithStatusSubresource(nc).Build()
@@ -142,11 +142,11 @@ func TestReconcile_ImageResolutionFails(t *testing.T) {
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if got.StatusConditions().Get(v1alpha1.ConditionTypeImagesReady).IsTrue() {
+	if got.StatusConditions().Get(apiv1.ConditionTypeImagesReady).IsTrue() {
 		t.Error("ImagesReady should be false when image resolution fails")
 	}
 	if got.StatusConditions().Root().IsTrue() {
@@ -155,7 +155,7 @@ func TestReconcile_ImageResolutionFails(t *testing.T) {
 }
 
 func TestReconcile_NetworkNotFound(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
 		WithObjects(nc).WithStatusSubresource(nc).Build()
@@ -166,11 +166,11 @@ func TestReconcile_NetworkNotFound(t *testing.T) {
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if got.StatusConditions().Get(v1alpha1.ConditionTypeNetworkReady).IsTrue() {
+	if got.StatusConditions().Get(apiv1.ConditionTypeNetworkReady).IsTrue() {
 		t.Error("NetworkReady should be false when network is missing")
 	}
 	if got.StatusConditions().Root().IsTrue() {
@@ -179,7 +179,7 @@ func TestReconcile_NetworkNotFound(t *testing.T) {
 }
 
 func TestReconcile_FirewallNotFound(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
 	nc.Spec.FirewallIDs = []int64{7}
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
@@ -190,11 +190,11 @@ func TestReconcile_FirewallNotFound(t *testing.T) {
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if got.StatusConditions().Get(v1alpha1.ConditionTypeResourcesReady).IsTrue() {
+	if got.StatusConditions().Get(apiv1.ConditionTypeResourcesReady).IsTrue() {
 		t.Error("ResourcesReady should be false when a firewall is missing")
 	}
 	if got.StatusConditions().Root().IsTrue() {
@@ -203,9 +203,9 @@ func TestReconcile_FirewallNotFound(t *testing.T) {
 }
 
 func TestReconcile_UserDataSecretValid(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "talos",
 		Key:       "userData",
@@ -224,11 +224,11 @@ func TestReconcile_UserDataSecretValid(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsTrue() {
+	if !got.StatusConditions().Get(apiv1.ConditionTypeUserDataReady).IsTrue() {
 		t.Error("UserDataReady should be true for a valid secret ref")
 	}
 	if !got.StatusConditions().Root().IsTrue() {
@@ -241,9 +241,9 @@ func TestReconcile_UserDataSecretValid(t *testing.T) {
 // referenced key. This is the "secret present, key absent" branch that differs from
 // the secret-missing case.
 func TestReconcile_UserDataKeyMissing(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "talos",
 		Key:       "userData",
@@ -263,11 +263,11 @@ func TestReconcile_UserDataKeyMissing(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsFalse() {
+	if !got.StatusConditions().Get(apiv1.ConditionTypeUserDataReady).IsFalse() {
 		t.Error("UserDataReady should be false when secret exists but referenced key is absent")
 	}
 	if got.StatusConditions().Root().IsTrue() {
@@ -276,9 +276,9 @@ func TestReconcile_UserDataKeyMissing(t *testing.T) {
 }
 
 func TestReconcile_UserDataSecretMissing(t *testing.T) {
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "does-not-exist",
 		Key:       "userData",
@@ -294,11 +294,11 @@ func TestReconcile_UserDataSecretMissing(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	got := &v1alpha1.HCloudNodeClass{}
+	got := &apiv1.HCloudNodeClass{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.StatusConditions().Get(v1alpha1.ConditionTypeUserDataReady).IsFalse() {
+	if !got.StatusConditions().Get(apiv1.ConditionTypeUserDataReady).IsFalse() {
 		t.Error("UserDataReady should be false when the secret is missing")
 	}
 	if got.StatusConditions().Root().IsTrue() {

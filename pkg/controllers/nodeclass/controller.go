@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 )
 
@@ -54,7 +54,7 @@ func NewController(kubeClient client.Client, networks NetworkGetter, firewalls F
 
 // warnf emits a Warning event on the HCloudNodeClass when a recorder is
 // available, and is a no-op otherwise (the controller still sets conditions).
-func (c *Controller) warnf(nc *v1alpha1.HCloudNodeClass, reason, action, format string, args ...interface{}) {
+func (c *Controller) warnf(nc *apiv1.HCloudNodeClass, reason, action, format string, args ...interface{}) {
 	if c.recorder == nil {
 		return
 	}
@@ -63,52 +63,52 @@ func (c *Controller) warnf(nc *v1alpha1.HCloudNodeClass, reason, action, format 
 
 func (c *Controller) Name() string { return "nodeclass.status" }
 
-func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (reconcile.Result, error) {
+func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (reconcile.Result, error) {
 	stored := nc.DeepCopy()
 
 	// Network validation.
 	net, _, err := c.networks.GetByID(ctx, nc.Spec.NetworkID)
 	switch {
 	case err != nil:
-		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeNetworkReady, "NetworkCheckFailed", err.Error())
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeNetworkReady, "NetworkCheckFailed", err.Error())
 		c.warnf(nc, "NetworkCheckFailed", "ValidateNetwork", "network check failed: %v", err)
 	case net == nil:
-		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeNetworkReady, "NetworkNotFound", "configured networkID does not exist")
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeNetworkReady, "NetworkNotFound", "configured networkID does not exist")
 		c.warnf(nc, "NetworkNotFound", "ValidateNetwork", "networkID %d does not exist", nc.Spec.NetworkID)
 	default:
-		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeNetworkReady)
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeNetworkReady)
 	}
 
 	// Validate referenced firewalls and SSH keys exist.
 	if reason, msg, unknown, ok := c.validateResources(ctx, nc); ok {
-		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeResourcesReady)
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeResourcesReady)
 	} else if unknown {
-		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeResourcesReady, reason, msg)
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeResourcesReady, reason, msg)
 		c.warnf(nc, reason, "ValidateResources", "%s", msg)
 	} else {
-		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeResourcesReady, reason, msg)
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeResourcesReady, reason, msg)
 		c.warnf(nc, reason, "ValidateResources", "%s", msg)
 	}
 
 	// Validate the userData secret ref (if set).
 	if reason, msg, unknown, ok := c.validateUserData(ctx, nc); ok {
-		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeUserDataReady)
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeUserDataReady)
 	} else if unknown {
-		nc.StatusConditions().SetUnknownWithReason(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeUserDataReady, reason, msg)
 		c.warnf(nc, reason, "ValidateUserData", "%s", msg)
 	} else {
-		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeUserDataReady, reason, msg)
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeUserDataReady, reason, msg)
 		c.warnf(nc, reason, "ValidateUserData", "%s", msg)
 	}
 
 	// Image resolution for both architectures.
 	resolved, ierr := c.resolveImages(ctx, nc)
 	if ierr != nil {
-		nc.StatusConditions().SetFalse(v1alpha1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
 		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
 	} else {
 		nc.Status.ResolvedImages = resolved
-		nc.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesReady)
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
 	}
 
 	if !equality.Semantic.DeepEqual(stored, nc) {
@@ -123,7 +123,7 @@ func (c *Controller) Reconcile(ctx context.Context, nc *v1alpha1.HCloudNodeClass
 
 // validateResources checks every referenced firewall and SSH key exists.
 // Returns ok=true when all exist; unknown=true on a transient API error.
-func (c *Controller) validateResources(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
+func (c *Controller) validateResources(ctx context.Context, nc *apiv1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
 	for _, id := range nc.Spec.FirewallIDs {
 		fw, _, err := c.firewalls.GetByID(ctx, id)
 		if err != nil {
@@ -148,7 +148,7 @@ func (c *Controller) validateResources(ctx context.Context, nc *v1alpha1.HCloudN
 // validateUserData checks that the referenced userData Secret and key exist and
 // are non-empty. Returns ok=true when there is nothing to validate or it
 // resolves successfully; unknown=true on a transient API error.
-func (c *Controller) validateUserData(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
+func (c *Controller) validateUserData(ctx context.Context, nc *apiv1.HCloudNodeClass) (reason, msg string, unknown, ok bool) {
 	ref := nc.Spec.UserDataSecretRef
 	if ref == nil {
 		return "", "", false, true
@@ -166,13 +166,13 @@ func (c *Controller) validateUserData(ctx context.Context, nc *v1alpha1.HCloudNo
 	return "", "", false, true
 }
 
-func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeClass) ([]v1alpha1.ResolvedImage, error) {
+func (c *Controller) resolveImages(ctx context.Context, nc *apiv1.HCloudNodeClass) ([]apiv1.ResolvedImage, error) {
 	// hcloud image IDs are global (not per-location), so resolve one image per
 	// architecture. Resolve each architecture independently: many clusters only
 	// have an image for a single arch (e.g. an all-amd64 cluster has no arm64
 	// Talos snapshot), and a NodeClass is usable as long as at least one arch
 	// resolves. Only fail when NO architecture resolves.
-	var out []v1alpha1.ResolvedImage
+	var out []apiv1.ResolvedImage
 	var errs []error
 	for _, arch := range []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM} {
 		img, err := c.images.Resolve(ctx, nc.Spec.ImageSelector, arch)
@@ -180,7 +180,7 @@ func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeC
 			errs = append(errs, fmt.Errorf("%s: %w", arch, err))
 			continue
 		}
-		out = append(out, v1alpha1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
+		out = append(out, apiv1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no image resolved for any architecture: %w", errors.Join(errs...))
@@ -192,7 +192,7 @@ func (c *Controller) resolveImages(ctx context.Context, nc *v1alpha1.HCloudNodeC
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	c.recorder = m.GetEventRecorder(c.Name())
 	return controllerruntime.NewControllerManagedBy(m).
-		For(&v1alpha1.HCloudNodeClass{}).
+		For(&apiv1.HCloudNodeClass{}).
 		Named(c.Name()).
 		Complete(reconcile.AsReconciler(m.GetClient(), c))
 }

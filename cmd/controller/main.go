@@ -11,8 +11,8 @@ import (
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/operator"
 
-	// Register our v1alpha1 types.
-	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	// Register our HCloudNodeClass v1 types.
+	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"

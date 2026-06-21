@@ -1,8 +1,8 @@
-package v1alpha1
+package v1
 
 const (
 	Group   = "karpenter.hetzner.cloud"
-	Version = "v1alpha1"
+	Version = "v1"
 
 	LabelCPUType      = Group + "/cpu-type"
 	LabelServerFamily = Group + "/server-family"

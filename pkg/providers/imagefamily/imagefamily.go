@@ -9,7 +9,7 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 )
 
 // labelSelectorString renders an hcloud label selector from a map (sorted for
@@ -48,7 +48,7 @@ func NewProvider(client ImageClient) *Provider {
 
 // Resolve returns the best matching image for the given selector and architecture.
 // Supported families: "ubuntu", "talos".
-func (p *Provider) Resolve(ctx context.Context, selector v1alpha1.ImageSelector, arch hcloud.Architecture) (*hcloud.Image, error) {
+func (p *Provider) Resolve(ctx context.Context, selector apiv1.ImageSelector, arch hcloud.Architecture) (*hcloud.Image, error) {
 	log := logf.FromContext(ctx)
 	ls := labelSelectorString(selector.Selector)
 	var img *hcloud.Image

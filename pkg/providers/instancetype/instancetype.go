@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 )
 
@@ -168,8 +168,8 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 			scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, st.Name),
 			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, arch),
 			scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
-			scheduling.NewRequirement(v1alpha1.LabelCPUType, corev1.NodeSelectorOpIn, cpuType),
-			scheduling.NewRequirement(v1alpha1.LabelServerFamily, corev1.NodeSelectorOpIn, serverFamily(st.Name)),
+			scheduling.NewRequirement(apiv1.LabelCPUType, corev1.NodeSelectorOpIn, cpuType),
+			scheduling.NewRequirement(apiv1.LabelServerFamily, corev1.NodeSelectorOpIn, serverFamily(st.Name)),
 		),
 		Capacity: corev1.ResourceList{
 			corev1.ResourceCPU:              *resource.NewMilliQuantity(int64(st.Cores)*1000, resource.DecimalSI),

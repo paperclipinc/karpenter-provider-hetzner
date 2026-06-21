@@ -7,7 +7,7 @@ import (
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 )
 
 // mockImageClient is a fake ImageClient for testing.
@@ -70,7 +70,7 @@ func TestResolveUbuntu_PicksFirst(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureX86)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureX86)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestResolveUbuntu_VersionPin(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu", Version: "20.04"}, hcloud.ArchitectureX86)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "ubuntu", Version: "20.04"}, hcloud.ArchitectureX86)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestResolveUbuntu_ArchFilter(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureARM)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "ubuntu"}, hcloud.ArchitectureARM)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestResolveUbuntu_NoMatch(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	_, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "ubuntu", Version: "24.04"}, hcloud.ArchitectureX86)
+	_, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "ubuntu", Version: "24.04"}, hcloud.ArchitectureX86)
 	if err == nil {
 		t.Fatal("expected error for no matching image, got nil")
 	}
@@ -131,7 +131,7 @@ func TestResolveTalos_PicksNewest(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestResolveTalos_VersionPin(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos", Version: "v1.6.0"}, hcloud.ArchitectureX86)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "talos", Version: "v1.6.0"}, hcloud.ArchitectureX86)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestResolveTalos_IgnoresSystemImages(t *testing.T) {
 	}
 	p := NewProvider(&mockImageClient{images: images})
 
-	img, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
+	img, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "talos"}, hcloud.ArchitectureX86)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestResolveTalos_IgnoresSystemImages(t *testing.T) {
 func TestResolveUnsupportedFamily(t *testing.T) {
 	p := NewProvider(&mockImageClient{})
 
-	_, err := p.Resolve(context.Background(), v1alpha1.ImageSelector{Family: "fedora"}, hcloud.ArchitectureX86)
+	_, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "fedora"}, hcloud.ArchitectureX86)
 	if err == nil {
 		t.Fatal("expected error for unsupported family, got nil")
 	}
@@ -188,7 +188,7 @@ func TestResolveTalos_LabelSelectorForwarded(t *testing.T) {
 		makeImage(1, hcloud.ImageTypeSnapshot, hcloud.ArchitectureX86, "talos v1.13.3", baseTime),
 	}}
 	p := NewProvider(fc)
-	sel := v1alpha1.ImageSelector{Family: "talos", Selector: map[string]string{"caph-image-name": "talos-v1.13.3-gvisor"}}
+	sel := apiv1.ImageSelector{Family: "talos", Selector: map[string]string{"caph-image-name": "talos-v1.13.3-gvisor"}}
 	if _, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestResolveUbuntu_LabelSelectorForwarded(t *testing.T) {
 		makeImage(2, hcloud.ImageTypeSystem, hcloud.ArchitectureX86, "Ubuntu 24.04", baseTime),
 	}}
 	p := NewProvider(fc)
-	sel := v1alpha1.ImageSelector{Family: "ubuntu", Selector: map[string]string{"role": "worker"}}
+	sel := apiv1.ImageSelector{Family: "ubuntu", Selector: map[string]string{"role": "worker"}}
 	if _, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
