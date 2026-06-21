@@ -14,7 +14,7 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
@@ -38,8 +38,8 @@ func TestGetSupportedNodeClasses(t *testing.T) {
 	if len(classes) != 1 {
 		t.Fatalf("GetSupportedNodeClasses() returned %d classes, want 1", len(classes))
 	}
-	if _, ok := classes[0].(*v1alpha1.HCloudNodeClass); !ok {
-		t.Errorf("GetSupportedNodeClasses()[0] is not *v1alpha1.HCloudNodeClass")
+	if _, ok := classes[0].(*apiv1.HCloudNodeClass); !ok {
+		t.Errorf("GetSupportedNodeClasses()[0] is not *apiv1.HCloudNodeClass")
 	}
 }
 
@@ -120,9 +120,9 @@ func (f *fakeImageClient) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts)
 // buildCP builds a CloudProvider whose NodeClass is nc and whose single backing
 // server is server, plus a NodeClaim whose desired state matches the server
 // (BASELINE has no drift; each test perturbs one thing).
-func buildCP(t *testing.T, nc *v1alpha1.HCloudNodeClass, server *hcloud.Server) (*cloudprovider.CloudProvider, *karpv1.NodeClaim) {
+func buildCP(t *testing.T, nc *apiv1.HCloudNodeClass, server *hcloud.Server) (*cloudprovider.CloudProvider, *karpv1.NodeClaim) {
 	t.Helper()
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	if nc.Name == "" {
 		nc.Name = "default"
 	}
@@ -142,7 +142,7 @@ func buildCP(t *testing.T, nc *v1alpha1.HCloudNodeClass, server *hcloud.Server) 
 	if server.ServerType != nil {
 		nodeClaim.Labels[corev1.LabelInstanceTypeStable] = server.ServerType.Name
 	}
-	nodeClaim.Spec.NodeClassRef = &karpv1.NodeClassReference{Name: nc.Name, Group: v1alpha1.Group, Kind: "HCloudNodeClass"}
+	nodeClaim.Spec.NodeClassRef = &karpv1.NodeClassReference{Name: nc.Name, Group: apiv1.Group, Kind: "HCloudNodeClass"}
 	nodeClaim.Status.ProviderID = instance.FormatProviderID(server.ID)
 	if server.Image != nil {
 		nodeClaim.Status.ImageID = strconv.FormatInt(server.Image.ID, 10)
@@ -162,13 +162,13 @@ func baselineServer() *hcloud.Server {
 }
 
 // baselineNodeClass returns a NodeClass matching baselineServer (network 1, no firewalls).
-func baselineNodeClass() *v1alpha1.HCloudNodeClass {
-	return &v1alpha1.HCloudNodeClass{
+func baselineNodeClass() *apiv1.HCloudNodeClass {
+	return &apiv1.HCloudNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
-		Spec: v1alpha1.HCloudNodeClassSpec{
+		Spec: apiv1.HCloudNodeClassSpec{
 			Locations:     []string{"nbg1"},
 			NetworkID:     1,
-			ImageSelector: v1alpha1.ImageSelector{Family: "ubuntu"},
+			ImageSelector: apiv1.ImageSelector{Family: "ubuntu"},
 		},
 	}
 }
@@ -196,10 +196,10 @@ func cx22Type() *hcloud.ServerType {
 // buildCPWithTypes wires a CloudProvider with the given NodeClass and server types,
 // and returns the fakes so tests can inject errors / inspect state. Unlike buildCP
 // it does NOT pre-seed a backing server.
-func buildCPWithTypes(t *testing.T, nc *v1alpha1.HCloudNodeClass, types []*hcloud.ServerType) (
+func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.ServerType) (
 	*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
 	t.Helper()
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	if nc.Name == "" {
 		nc.Name = "default"
 	}
@@ -218,7 +218,7 @@ func buildCPWithTypes(t *testing.T, nc *v1alpha1.HCloudNodeClass, types []*hclou
 // createNodeClaim returns a NodeClaim with empty requirements (compatible with any type).
 func createNodeClaim() *karpv1.NodeClaim {
 	nc := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim"}}
-	nc.Spec.NodeClassRef = &karpv1.NodeClassReference{Name: "default", Group: v1alpha1.Group, Kind: "HCloudNodeClass"}
+	nc.Spec.NodeClassRef = &karpv1.NodeClassReference{Name: "default", Group: apiv1.Group, Kind: "HCloudNodeClass"}
 	return nc
 }
 
@@ -439,7 +439,7 @@ func TestCreate_NoCompatibleType(t *testing.T) {
 func TestCreate_UserDataFromSecret(t *testing.T) {
 	nc := baselineNodeClass()
 	nc.Spec.UserData = "inline-should-be-ignored"
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "talos",
 		Key:       "userData",
@@ -449,7 +449,7 @@ func TestCreate_UserDataFromSecret(t *testing.T) {
 		Data:       map[string][]byte{"userData": []byte("machine:\n  type: worker\n")},
 	}
 
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
@@ -474,7 +474,7 @@ func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
 	nc.Spec.UserData = "cloud-init-inline"
 	// UserDataSecretRef is intentionally left nil.
 
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
@@ -497,7 +497,7 @@ func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
 // referenced key (key absent == invalid, same as secret missing).
 func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
 	nc := baselineNodeClass()
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "talos",
 		Key:       "userData",
@@ -508,7 +508,7 @@ func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
 		Data:       map[string][]byte{"other": []byte("x")},
 	}
 
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc, secret).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: []*hcloud.ServerType{cx22Type()}}
@@ -528,13 +528,13 @@ func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
 // UserDataSecretRef points to a Secret that does not exist in the cluster.
 func TestCreate_UserDataSecretMissing(t *testing.T) {
 	nc := baselineNodeClass()
-	nc.Spec.UserDataSecretRef = &v1alpha1.UserDataSecretReference{
+	nc.Spec.UserDataSecretRef = &apiv1.UserDataSecretReference{
 		Namespace: "kube-system",
 		Name:      "does-not-exist",
 		Key:       "userData",
 	}
 
-	_ = v1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	// Secret is intentionally NOT added to the fake client.
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}

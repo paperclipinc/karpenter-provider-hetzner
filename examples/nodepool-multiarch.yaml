@@ -22,7 +22,7 @@
 #   where both images carry that label.  If only one arch has an image with
 #   the selector, the provider will report ImagesReady=False.
 
-apiVersion: karpenter.hetzner.cloud/v1alpha1
+apiVersion: karpenter.hetzner.cloud/v1
 kind: HCloudNodeClass
 metadata:
   name: talos-multiarch

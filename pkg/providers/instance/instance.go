@@ -10,7 +10,7 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 )
 
@@ -138,13 +138,13 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 	for k, v := range opts.Labels {
 		labels[k] = v
 	}
-	labels[v1alpha1.ServerLabelManagedBy] = v1alpha1.ServerValueManagedBy
-	labels[v1alpha1.ServerLabelCluster] = p.clusterName
+	labels[apiv1.ServerLabelManagedBy] = apiv1.ServerValueManagedBy
+	labels[apiv1.ServerLabelCluster] = p.clusterName
 	if opts.NodeClaim != "" {
-		labels[v1alpha1.ServerLabelNodeClaim] = opts.NodeClaim
+		labels[apiv1.ServerLabelNodeClaim] = opts.NodeClaim
 	}
 	if opts.NodePool != "" {
-		labels[v1alpha1.ServerLabelNodePool] = opts.NodePool
+		labels[apiv1.ServerLabelNodePool] = opts.NodePool
 	}
 
 	// Build networks list.
@@ -294,8 +294,8 @@ func (p *Provider) List(ctx context.Context) ([]*hcloud.Server, error) {
 	opts := hcloud.ServerListOpts{
 		ListOpts: hcloud.ListOpts{
 			LabelSelector: fmt.Sprintf("%s=%s,%s=%s",
-				v1alpha1.ServerLabelManagedBy, v1alpha1.ServerValueManagedBy,
-				v1alpha1.ServerLabelCluster, p.clusterName),
+				apiv1.ServerLabelManagedBy, apiv1.ServerValueManagedBy,
+				apiv1.ServerLabelCluster, p.clusterName),
 		},
 	}
 	servers, err := p.client.AllWithOpts(ctx, opts)
@@ -307,10 +307,10 @@ func (p *Provider) List(ctx context.Context) ([]*hcloud.Server, error) {
 
 // ParseProviderID parses a Hetzner provider ID of the form "hcloud://<id>" and returns the integer ID.
 func ParseProviderID(providerID string) (int64, error) {
-	if !strings.HasPrefix(providerID, v1alpha1.ProviderIDPrefix) {
-		return 0, fmt.Errorf("provider ID %q must start with %q", providerID, v1alpha1.ProviderIDPrefix)
+	if !strings.HasPrefix(providerID, apiv1.ProviderIDPrefix) {
+		return 0, fmt.Errorf("provider ID %q must start with %q", providerID, apiv1.ProviderIDPrefix)
 	}
-	idStr := strings.TrimPrefix(providerID, v1alpha1.ProviderIDPrefix)
+	idStr := strings.TrimPrefix(providerID, apiv1.ProviderIDPrefix)
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid server ID in provider ID %q: %w", providerID, err)
@@ -320,5 +320,5 @@ func ParseProviderID(providerID string) (int64, error) {
 
 // FormatProviderID formats a Hetzner server ID as a Karpenter provider ID.
 func FormatProviderID(serverID int64) string {
-	return v1alpha1.ProviderIDPrefix + strconv.FormatInt(serverID, 10)
+	return apiv1.ProviderIDPrefix + strconv.FormatInt(serverID, 10)
 }

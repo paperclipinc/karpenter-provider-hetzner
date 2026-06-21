@@ -12,7 +12,7 @@
 # NEVER commit real secret data to git.  The bootstrap Secret shown at the
 # bottom of this file is a commented template only.
 
-apiVersion: karpenter.hetzner.cloud/v1alpha1
+apiVersion: karpenter.hetzner.cloud/v1
 kind: HCloudNodeClass
 metadata:
   name: talos-default

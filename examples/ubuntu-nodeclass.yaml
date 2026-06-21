@@ -16,7 +16,7 @@
 #     frequently and consider userDataSecretRef to keep them out of git.
 #     See docs/ubuntu-bootstrap.md for details.
 
-apiVersion: karpenter.hetzner.cloud/v1alpha1
+apiVersion: karpenter.hetzner.cloud/v1
 kind: HCloudNodeClass
 metadata:
   name: ubuntu-default

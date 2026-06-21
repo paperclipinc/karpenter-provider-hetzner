@@ -1,0 +1,123 @@
+# k3s NodeClass + NodePool — k3s agent join via inline cloud-init
+#
+# Karpenter is bootstrap-agnostic: Hetzner runs `userData` as cloud-init on
+# first boot, so a node can join *any* distribution.  This example joins an
+# existing k3s server (control plane) as a k3s *agent* using an Ubuntu image.
+#
+# Prerequisites:
+#   - A running k3s server reachable from new nodes on :6443 (supervisor/API).
+#   - The k3s node-join token.  On a server node:
+#       sudo cat /var/lib/rancher/k3s/server/node-token
+#   - hcloud-cloud-controller-manager installed in the cluster.  It assigns the
+#     providerID `hcloud://<id>` that Karpenter needs to correlate a NodeClaim
+#     to its Node.  The k3s built-in cloud controller MUST be disabled on the
+#     servers (start them with `--disable-cloud-controller`) and the agent
+#     kubelet MUST run with `cloud-provider=external` (set below).  The node's
+#     hostname must equal the Hetzner server name so the CCM can match it;
+#     Hetzner sets the hostname to the server name by default, which the
+#     provider controls — so this matches out of the box.
+#
+# Apply with:
+#   kubectl apply -f examples/k3s-nodeclass.yaml
+#
+# SECURITY NOTE: the k3s token grants cluster membership.  Prefer storing the
+# cloud-init blob in a Secret and referencing it via userDataSecretRef instead
+# of committing it to git.  See docs/k3s-bootstrap.md.
+
+apiVersion: karpenter.hetzner.cloud/v1
+kind: HCloudNodeClass
+metadata:
+  name: k3s-default
+spec:
+  locations:
+    - nbg1
+    - fsn1
+
+  imageSelector:
+    family: ubuntu
+    # k3s runs on a stock Ubuntu image; no custom snapshot required.
+    # ADJUST: "22.04" or "24.04"; omit to always get the newest.
+    version: "24.04"
+
+  # networkID: numeric Hetzner private network ID the agents attach to.
+  # ADJUST: replace with your network ID.
+  networkID: 123456
+
+  # firewallIDs: optional.  ADJUST or remove.
+  firewallIDs:
+    - 987654
+
+  placementGroupStrategy: spread
+
+  labels:
+    managed-by: karpenter
+
+  # Keep a public IP so the node can pull the k3s installer and images.
+  # Set false if you route egress via NAT / a private registry mirror.
+  enablePublicIPv4: true
+  enablePublicIPv6: false
+
+  # userData: cloud-init that installs the k3s agent and joins the server.
+  # Replace every <PLACEHOLDER> before applying.
+  userData: |
+    #cloud-config
+    write_files:
+      # k3s reads agent flags from this config file before the install runs.
+      - path: /etc/rancher/k3s/config.yaml
+        permissions: "0600"
+        content: |
+          # Let hcloud-cloud-controller-manager own node lifecycle / providerID.
+          kubelet-arg:
+            - "cloud-provider=external"
+          # OPTIONAL: pin the kubelet/flannel to the private NIC.  Uncomment and
+          # set if your cluster runs its data plane over the Hetzner network.
+          # node-ip: "<PRIVATE_IP>"
+          # flannel-iface: "enp7s0"
+    runcmd:
+      # ADJUST: <CONTROL_PLANE_ENDPOINT> = k3s server IP/DNS reachable on :6443
+      #         <NODE_TOKEN>             = /var/lib/rancher/k3s/server/node-token
+      #         INSTALL_K3S_VERSION      = match your server's k3s version
+      - |
+        curl -sfL https://get.k3s.io | \
+          K3S_URL="https://<CONTROL_PLANE_ENDPOINT>:6443" \
+          K3S_TOKEN="<NODE_TOKEN>" \
+          INSTALL_K3S_VERSION="v1.31.5+k3s1" \
+          sh -s - agent
+
+---
+# NodePool for k3s agents — x86-64 shared CPU (cpx) for cost.
+
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: k3s-amd64
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.hetzner.cloud
+        kind: HCloudNodeClass
+        name: k3s-default
+
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+
+        # cpx: shared x86.  Add cax (ARM) for the best price/vCPU — the same
+        # cloud-init works on ARM since k3s ships arm64 binaries.
+        - key: karpenter.hetzner.cloud/server-family
+          operator: In
+          values: [cpx]
+
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: [nbg1, fsn1]
+
+  limits:
+    cpu: "100"
+    memory: 400Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s

@@ -17,7 +17,7 @@ import (
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
@@ -66,7 +66,7 @@ func (cp *CloudProvider) Name() string {
 
 // GetSupportedNodeClasses returns the supported node class types.
 func (cp *CloudProvider) GetSupportedNodeClasses() []status.Object {
-	return []status.Object{&v1alpha1.HCloudNodeClass{}}
+	return []status.Object{&apiv1.HCloudNodeClass{}}
 }
 
 // RepairPolicies returns the repair policies for unhealthy nodes.
@@ -365,7 +365,7 @@ func (cp *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *karpv1.NodeCl
 
 // resolveUserData returns the userData for a NodeClass, reading it from the
 // referenced Secret when UserDataSecretRef is set (takes precedence over inline UserData).
-func (cp *CloudProvider) resolveUserData(ctx context.Context, nc *v1alpha1.HCloudNodeClass) (string, error) {
+func (cp *CloudProvider) resolveUserData(ctx context.Context, nc *apiv1.HCloudNodeClass) (string, error) {
 	ref := nc.Spec.UserDataSecretRef
 	if ref == nil {
 		return nc.Spec.UserData, nil
@@ -382,11 +382,11 @@ func (cp *CloudProvider) resolveUserData(ctx context.Context, nc *v1alpha1.HClou
 }
 
 // resolveNodeClass fetches the HCloudNodeClass referenced by ref.
-func (cp *CloudProvider) resolveNodeClass(ctx context.Context, ref *karpv1.NodeClassReference) (*v1alpha1.HCloudNodeClass, error) {
+func (cp *CloudProvider) resolveNodeClass(ctx context.Context, ref *karpv1.NodeClassReference) (*apiv1.HCloudNodeClass, error) {
 	if ref == nil {
 		return nil, fmt.Errorf("nodeClassRef is nil")
 	}
-	nodeClass := &v1alpha1.HCloudNodeClass{}
+	nodeClass := &apiv1.HCloudNodeClass{}
 	if err := cp.kubeClient.Get(ctx, types.NamespacedName{Name: ref.Name}, nodeClass); err != nil {
 		return nil, fmt.Errorf("getting HCloudNodeClass %q: %w", ref.Name, err)
 	}

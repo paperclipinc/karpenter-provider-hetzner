@@ -2,8 +2,8 @@ apiVersion: v2
 name: karpenter-provider-hetzner
 description: Karpenter cloud provider for Hetzner Cloud
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+version: 2.0.0
+appVersion: "2.0.0"
 # home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
 home: https://paperclip.inc/karpenter-hetzner
@@ -26,4 +26,12 @@ annotations:
       url: https://github.com/paperclipinc/karpenter-provider-hetzner
     - name: Talos bootstrap guide
       url: https://github.com/paperclipinc/karpenter-provider-hetzner/blob/main/docs/talos-bootstrap.md
+    - name: k3s bootstrap guide
+      url: https://github.com/paperclipinc/karpenter-provider-hetzner/blob/main/docs/k3s-bootstrap.md
   artifacthub.io/category: integration-delivery
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/changes: |
+    - kind: changed
+      description: "BREAKING: HCloudNodeClass graduated from karpenter.hetzner.cloud/v1alpha1 to /v1; re-apply node classes (no conversion webhook)"
+    - kind: added
+      description: "k3s agent bootstrap example and guide (examples/k3s-nodeclass.yaml, docs/k3s-bootstrap.md)"

@@ -1,4 +1,4 @@
-package v1alpha1
+package v1
 
 import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"

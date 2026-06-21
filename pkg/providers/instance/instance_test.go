@@ -9,7 +9,7 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
-	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1alpha1"
+	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 )
 
 // mockActionWaiter is a fake ActionWaiter for testing.
@@ -97,17 +97,17 @@ func TestCreate_LabelsApplied(t *testing.T) {
 	}
 
 	// Verify management labels.
-	if server.Labels[v1alpha1.ServerLabelManagedBy] != v1alpha1.ServerValueManagedBy {
-		t.Errorf("missing managed-by label, got %q", server.Labels[v1alpha1.ServerLabelManagedBy])
+	if server.Labels[apiv1.ServerLabelManagedBy] != apiv1.ServerValueManagedBy {
+		t.Errorf("missing managed-by label, got %q", server.Labels[apiv1.ServerLabelManagedBy])
 	}
-	if server.Labels[v1alpha1.ServerLabelNodeClaim] != "my-claim" {
-		t.Errorf("expected nodeclaim label 'my-claim', got %q", server.Labels[v1alpha1.ServerLabelNodeClaim])
+	if server.Labels[apiv1.ServerLabelNodeClaim] != "my-claim" {
+		t.Errorf("expected nodeclaim label 'my-claim', got %q", server.Labels[apiv1.ServerLabelNodeClaim])
 	}
-	if server.Labels[v1alpha1.ServerLabelNodePool] != "my-pool" {
-		t.Errorf("expected nodepool label 'my-pool', got %q", server.Labels[v1alpha1.ServerLabelNodePool])
+	if server.Labels[apiv1.ServerLabelNodePool] != "my-pool" {
+		t.Errorf("expected nodepool label 'my-pool', got %q", server.Labels[apiv1.ServerLabelNodePool])
 	}
-	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
-		t.Errorf("missing cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
+	if server.Labels[apiv1.ServerLabelCluster] != "test-cluster" {
+		t.Errorf("missing cluster label, got %q", server.Labels[apiv1.ServerLabelCluster])
 	}
 }
 
@@ -263,8 +263,8 @@ func TestCreate_ClusterLabelApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if server.Labels[v1alpha1.ServerLabelCluster] != "test-cluster" {
-		t.Errorf("expected cluster label, got %q", server.Labels[v1alpha1.ServerLabelCluster])
+	if server.Labels[apiv1.ServerLabelCluster] != "test-cluster" {
+		t.Errorf("expected cluster label, got %q", server.Labels[apiv1.ServerLabelCluster])
 	}
 }
 
@@ -274,10 +274,10 @@ func TestList_ScopesByCluster(t *testing.T) {
 	if _, err := p.List(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelCluster+"=test-cluster") {
+	if !strings.Contains(client.lastListSelector, apiv1.ServerLabelCluster+"=test-cluster") {
 		t.Errorf("List selector %q does not scope by cluster", client.lastListSelector)
 	}
-	if !strings.Contains(client.lastListSelector, v1alpha1.ServerLabelManagedBy+"="+v1alpha1.ServerValueManagedBy) {
+	if !strings.Contains(client.lastListSelector, apiv1.ServerLabelManagedBy+"="+apiv1.ServerValueManagedBy) {
 		t.Errorf("List selector %q missing managed-by", client.lastListSelector)
 	}
 }
