@@ -156,12 +156,14 @@ comments explaining every field.
 |------|-------------|
 | [`examples/talos-nodeclass.yaml`](examples/talos-nodeclass.yaml) | Talos Linux, private-network cluster, image pinned via label selector, machineconfig from a Secret |
 | [`examples/ubuntu-nodeclass.yaml`](examples/ubuntu-nodeclass.yaml) | Ubuntu 24.04, kubeadm join via inline cloud-init `userData` |
+| [`examples/k3s-nodeclass.yaml`](examples/k3s-nodeclass.yaml) | k3s agent join via cloud-init on an Ubuntu image (for k3s-based clusters) |
 | [`examples/nodepool-multiarch.yaml`](examples/nodepool-multiarch.yaml) | Multi-arch pattern: one NodeClass, two NodePools (amd64 CCX + arm64 CAX) |
 
 ### Bootstrap guides
 
 - [Talos bootstrap guide](docs/talos-bootstrap.md) — obtaining the worker machineconfig, pinning images, and verifying node join.
 - [Ubuntu bootstrap recipe](docs/ubuntu-bootstrap.md) — kubeadm join via cloud-init, keeping tokens out of git, trade-offs vs Talos.
+- [k3s bootstrap recipe](docs/k3s-bootstrap.md) — k3s agent join via cloud-init, using the hcloud CCM for providerID; the natural path for k3s installers (hetzner-k3s, kube-hetzner).
 
 ## Configuration
 

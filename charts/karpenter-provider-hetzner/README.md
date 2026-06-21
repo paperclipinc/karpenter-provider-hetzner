@@ -15,6 +15,23 @@ helm install karpenter-provider-hetzner ./charts/karpenter-provider-hetzner \
 
 `clusterName` is required; the controller fails to start without it.
 
+## Upgrading to 2.0.0 (CRD `v1`)
+
+Chart 2.0.0 graduates the `HCloudNodeClass` CRD from
+`karpenter.hetzner.cloud/v1alpha1` to the stable `/v1`. There is **no
+conversion webhook**, so this is a breaking change:
+
+```bash
+helm upgrade karpenter-provider-hetzner ./charts/karpenter-provider-hetzner -n kube-system
+# Helm does not upgrade CRDs in crds/ on its own — apply the new CRD, then
+# re-apply your node classes with apiVersion: karpenter.hetzner.cloud/v1:
+kubectl apply -f charts/karpenter-provider-hetzner/crds/
+kubectl apply -f your-nodeclasses-v1.yaml
+```
+
+Existing `v1alpha1` objects are not migrated automatically; recreate them under
+`v1` (the spec is unchanged — only the `apiVersion` differs).
+
 ## Values
 
 | Key | Default | Description |
