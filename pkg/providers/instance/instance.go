@@ -9,6 +9,7 @@ import (
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
@@ -229,12 +230,17 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 	return result.Server, nil
 }
 
-// Delete removes the server identified by providerID.
-// If the server is already gone (NotFound), Delete returns nil (idempotent).
+// Delete removes the server identified by providerID. It returns nil once the
+// deletion has been triggered (Hetzner deletes asynchronously), and a
+// cloudprovider.NodeClaimNotFoundError once the server no longer exists — the
+// signal Karpenter's termination controller uses to finalize the NodeClaim.
 func (p *Provider) Delete(ctx context.Context, providerID string) error {
 	err := p.delete(ctx, providerID)
+	// A NodeClaimNotFoundError means the instance is already terminated, which is
+	// the expected steady-state result of a completed deletion — not a failure —
+	// so it must not be counted as a server-delete error.
 	result := metrics.ResultSuccess
-	if err != nil {
+	if err != nil && !karpcp.IsNodeClaimNotFoundError(err) {
 		result = metrics.ResultError
 	}
 	metrics.RecordServerDelete(result)
@@ -252,20 +258,23 @@ func (p *Provider) delete(ctx context.Context, providerID string) error {
 	server, _, err := p.client.GetByID(ctx, id)
 	if err != nil {
 		if hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
-			return nil
+			return karpcp.NewNodeClaimNotFoundError(fmt.Errorf("server %d not found", id))
 		}
 		return fmt.Errorf("getting server %d: %w", id, err)
 	}
 	if server == nil {
-		// Server not found.
-		return nil
+		// Server already gone. Per the CloudProvider.Delete contract, return a
+		// NodeClaimNotFoundError (not nil) once the instance is terminated — it is
+		// the signal Karpenter's termination controller uses to remove the NodeClaim
+		// finalizer. Returning nil makes it requeue indefinitely and leaks the NodeClaim.
+		return karpcp.NewNodeClaimNotFoundError(fmt.Errorf("server %d not found", id))
 	}
 
 	log.Info("deleting server", "serverID", id)
 	_, _, err = p.client.DeleteWithResult(ctx, server)
 	if err != nil {
 		if hcloud.IsError(err, hcloud.ErrorCodeNotFound) {
-			return nil
+			return karpcp.NewNodeClaimNotFoundError(fmt.Errorf("server %d not found", id))
 		}
 		return fmt.Errorf("deleting server %d: %w", id, err)
 	}
