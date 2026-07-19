@@ -32,6 +32,7 @@ type mockServerClient struct {
 	action           *hcloud.Action
 	nextActions      []*hcloud.Action
 	createErr        error
+	deleteErr        error
 	lastOpts         hcloud.ServerCreateOpts
 }
 
@@ -55,6 +56,9 @@ func (m *mockServerClient) Create(_ context.Context, opts hcloud.ServerCreateOpt
 }
 
 func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Server) (*hcloud.ServerDeleteResult, *hcloud.Response, error) {
+	if m.deleteErr != nil {
+		return nil, nil, m.deleteErr
+	}
 	delete(m.servers, server.ID)
 	m.deleted = append(m.deleted, server.ID)
 	return &hcloud.ServerDeleteResult{}, nil, nil
@@ -144,14 +148,32 @@ func TestDelete_RemovesServer(t *testing.T) {
 	}
 }
 
-func TestDelete_Idempotent(t *testing.T) {
-	// Deleting a server that doesn't exist should not return an error.
+func TestDelete_NotFoundReturnsNodeClaimNotFound(t *testing.T) {
+	// Deleting a server that no longer exists must return a NodeClaimNotFoundError
+	// (not nil). Karpenter's termination controller calls Delete each reconcile and
+	// only removes the NodeClaim finalizer once Delete reports the instance is gone;
+	// returning nil makes it requeue forever and leaks the NodeClaim.
 	client := newMockServerClient()
 	p := NewProvider(client, "test-cluster")
 
 	err := p.Delete(context.Background(), "hcloud://999")
-	if err != nil {
-		t.Fatalf("expected nil error for non-existent server, got: %v", err)
+	if !karpcp.IsNodeClaimNotFoundError(err) {
+		t.Fatalf("expected NodeClaimNotFoundError for non-existent server, got: %v", err)
+	}
+}
+
+func TestDelete_RaceDeletedReturnsNodeClaimNotFound(t *testing.T) {
+	// The server exists at GetByID but is already gone by DeleteWithResult (e.g. a
+	// concurrent delete in the Hetzner console). Delete must still surface a
+	// NodeClaimNotFoundError so the NodeClaim can be finalized.
+	client := newMockServerClient()
+	client.servers[55] = &hcloud.Server{ID: 55, Name: "node-55"}
+	client.deleteErr = hcloud.Error{Code: hcloud.ErrorCodeNotFound, Message: "not found"}
+	p := NewProvider(client, "test-cluster")
+
+	err := p.Delete(context.Background(), "hcloud://55")
+	if !karpcp.IsNodeClaimNotFoundError(err) {
+		t.Fatalf("expected NodeClaimNotFoundError on delete race, got: %v", err)
 	}
 }
 

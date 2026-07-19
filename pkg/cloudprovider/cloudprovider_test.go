@@ -385,14 +385,18 @@ func TestGetInstanceTypes_NilNodePool(t *testing.T) {
 // Edge-case tests
 // ---------------------------------------------------------------------------
 
-// TestDelete_Idempotent verifies that deleting a NodeClaim whose backing server
-// no longer exists (or never did) is a no-op and returns nil.
-func TestDelete_Idempotent(t *testing.T) {
+// TestDelete_NotFoundReturnsNodeClaimNotFound verifies that deleting a NodeClaim
+// whose backing server no longer exists surfaces a NodeClaimNotFoundError — the
+// signal Karpenter's termination controller uses to finalize the NodeClaim.
+func TestDelete_NotFoundReturnsNodeClaimNotFound(t *testing.T) {
 	cp, _, _ := buildCPWithTypes(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()})
 	nodeClaim := &karpv1.NodeClaim{}
 	nodeClaim.Status.ProviderID = instance.FormatProviderID(12345) // not seeded
-	if err := cp.Delete(context.Background(), nodeClaim); err != nil {
-		t.Errorf("Delete of missing server should be nil, got %v", err)
+	// Deleting an already-gone server must surface as NodeClaimNotFoundError so
+	// Karpenter's termination controller can finalize the NodeClaim instead of
+	// requeueing forever (which leaks the NodeClaim).
+	if err := cp.Delete(context.Background(), nodeClaim); !karpcp.IsNodeClaimNotFoundError(err) {
+		t.Errorf("expected NodeClaimNotFoundError for missing server, got %v", err)
 	}
 }
 
