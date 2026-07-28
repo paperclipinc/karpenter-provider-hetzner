@@ -1,4 +1,4 @@
-.PHONY: build test lint generate generate-verify docker-build test-envtest
+.PHONY: build test lint generate generate-verify vendor-core-crds docker-build test-envtest
 
 BINARY         := karpenter-provider-hetzner
 IMAGE          := ghcr.io/paperclipinc/karpenter-provider-hetzner
@@ -16,9 +16,25 @@ test:
 lint:
 	golangci-lint run ./...
 
-generate:
+generate: vendor-core-crds
 	$(CONTROLLER_GEN) object paths="./pkg/apis/..."
 	$(CONTROLLER_GEN) crd paths="./pkg/apis/..." output:crd:dir=charts/karpenter-provider-hetzner/crds
+
+# Copy the karpenter core CRDs (NodePool, NodeClaim) out of the pinned
+# sigs.k8s.io/karpenter module and into the chart. The controller watches both,
+# so the chart is unusable without them. Sourcing them from the module rather
+# than checking in a hand-copied snapshot means a version bump that changes the
+# schema is caught by `make generate-verify` in CI.
+#
+# NodeOverlay and CapacityBuffer are deliberately not vendored: both sit behind
+# feature gates that default to false, and this chart does not expose them.
+vendor-core-crds:
+	@set -eu; \
+	dir="$$(go list -m -f '{{.Dir}}' sigs.k8s.io/karpenter)"; \
+	for crd in karpenter.sh_nodepools.yaml karpenter.sh_nodeclaims.yaml; do \
+		cp "$$dir/pkg/apis/crds/$$crd" charts/karpenter-provider-hetzner/crds/$$crd; \
+		chmod u+w charts/karpenter-provider-hetzner/crds/$$crd; \
+	done
 
 generate-verify: generate
 	@if [ -n "$$(git status --porcelain pkg/apis charts/karpenter-provider-hetzner/crds)" ]; then \

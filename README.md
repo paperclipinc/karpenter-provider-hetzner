@@ -67,7 +67,13 @@ helm install karpenter-provider-hetzner \
 
 `clusterName` is **required** — it scopes which servers this controller manages. The controller fails fast if it is unset.
 
-The CRD ships in the chart's `crds/` directory and is installed automatically by Helm.
+Three CRDs ship in the chart's `crds/` directory and are installed automatically by Helm: `HCloudNodeClass` (this provider) plus the `NodePool` and `NodeClaim` core CRDs from `karpenter.sh`, which the controller watches. No separate CRD install step is needed.
+
+> **Upgrading:** Helm only ever *installs* resources from `crds/`; it never updates them. When upgrading to a chart whose karpenter core version changed, apply the CRDs yourself before `helm upgrade`:
+>
+> ```bash
+> kubectl apply --server-side -f https://raw.githubusercontent.com/paperclipinc/karpenter-provider-hetzner/main/charts/karpenter-provider-hetzner/crds/
+> ```
 
 ## Usage
 
