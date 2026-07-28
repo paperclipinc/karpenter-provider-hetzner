@@ -2,7 +2,10 @@ replicas: 1
 
 image:
   repository: ghcr.io/paperclipinc/karpenter-provider-hetzner
-  tag: latest
+  # Empty tracks the chart's appVersion, which the release workflow sets from
+  # the git tag and publishes as a matching image tag. Pinning "latest" here
+  # meant a released chart floated onto whatever was newest.
+  tag: ""
   pullPolicy: IfNotPresent
 
 auth:
