@@ -1,0 +1,36 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $pdb := .Values.podDisruptionBudget }}
+{{- $hasMin := hasKey $pdb "minAvailable" }}
+{{- $hasMax := hasKey $pdb "maxUnavailable" }}
+{{- if and $hasMin $hasMax }}
+{{- fail "podDisruptionBudget: set minAvailable OR maxUnavailable, not both." }}
+{{- end }}
+{{- if $hasMin }}
+{{- include "karpenter-hetzner.requireInt" (dict "value" $pdb.minAvailable "name" "podDisruptionBudget.minAvailable") }}
+{{- if ge (int $pdb.minAvailable) (int .Values.replicas) }}
+{{- fail "podDisruptionBudget.minAvailable must be < replicas: minAvailable >= replicas makes the Deployment un-evictable and blocks all voluntary drains." }}
+{{- end }}
+{{- end }}
+{{- if $hasMax }}
+{{- include "karpenter-hetzner.requireInt" (dict "value" $pdb.maxUnavailable "name" "podDisruptionBudget.maxUnavailable") }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: karpenter-provider-hetzner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: karpenter-provider-hetzner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  {{- if $hasMin }}
+  minAvailable: {{ $pdb.minAvailable | int }}
+  {{- else if $hasMax }}
+  maxUnavailable: {{ $pdb.maxUnavailable | int }}
+  {{- else }}
+  maxUnavailable: 1
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: karpenter-provider-hetzner
+{{- end }}

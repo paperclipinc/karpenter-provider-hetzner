@@ -25,6 +25,30 @@ resources:
     cpu: 500m
     memory: 256Mi
 
+# Pod scheduling & placement. All empty by default — opt in via values.
+nodeSelector: {}
+affinity: {}
+tolerations: []
+topologySpreadConstraints: []
+imagePullSecrets: []
+priorityClassName: ""
+
+# PodDisruptionBudget for voluntary-disruption safety (e.g. node drains). Enable
+# when running replicas > 1. Set minAvailable OR maxUnavailable (integers only,
+# mutually exclusive — no percentages); leave both unset to default to
+# maxUnavailable: 1, which never blocks drains (a single replica can still be
+# evicted — run replicas >= 2 to keep the controller available).
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1   # must be < replicas (so needs replicas >= 2)
+  # maxUnavailable: 1
+
+# Container launch overrides. `args` passes flags to the controller (e.g.
+# --log-level, --feature-gates); `command` replaces the entrypoint binary (rarely
+# needed — the hardcoded probes expect /healthz and /readyz).
+command: []
+args: []
+
 # Required: scopes managed servers so multiple clusters can share one Hetzner project.
 clusterName: ""
 
