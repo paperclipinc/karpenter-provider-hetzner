@@ -39,7 +39,8 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 | `clusterName` | `""` (required) | Scopes which servers the controller manages |
 | `replicas` | `1` | Controller replicas |
 | `image.repository` | `ghcr.io/paperclipinc/karpenter-provider-hetzner` | Image |
-| `image.tag` | `latest` | Pin a released tag in production |
+| `image.tag` | `""` | Empty tracks the chart appVersion; pin a tag in production |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `auth.secretRef.name` | `hcloud-token` | Secret holding the Hetzner token |
 | `auth.secretRef.key` | `token` | Key within the secret |
 | `serviceAccount.create` | `true` | Create the service account |
@@ -47,11 +48,36 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 | `metrics.port` | `8080` | Prometheus metrics port |
 | `healthProbe.port` | `8081` | Health/readiness probe port |
 | `resources` | see values.yaml | Container resources |
+| `nodeSelector` | `{}` | Pin the controller pod to specific nodes |
+| `affinity` | `{}` | `nodeAffinity` / `podAntiAffinity` |
+| `tolerations` | `[]` | Tolerate node taints |
+| `topologySpreadConstraints` | `[]` | Spread replicas across nodes/zones; needs a labelSelector matching the pod labels |
+| `imagePullSecrets` | `[]` | Pull from a private registry mirror |
+| `priorityClassName` | `""` | Pod priority class |
+| `podDisruptionBudget.enabled` | `false` | Create a PodDisruptionBudget (enable with `replicas > 1`) |
+| `podDisruptionBudget.minAvailable` | unset | Positive integer; mutually exclusive with `maxUnavailable` |
+| `podDisruptionBudget.maxUnavailable` | `1` (default) | Positive integer; never blocks drains (run `replicas >= 2` for availability) |
+| `command` | `[]` | Override the container entrypoint (advanced) |
+| `args` | `[]` | Controller flags, e.g. `--log-level`, `--feature-gates` |
 | `serviceMonitor.enabled` | `false` | Deploy a Service + ServiceMonitor for Prometheus Operator |
 | `serviceMonitor.interval` | `30s` | Scrape interval |
 | `serviceMonitor.additionalLabels` | `{}` | Extra labels on the ServiceMonitor (for Prometheus Operator selector) |
 
 The CRD is installed from `crds/` automatically by Helm.
+
+## Scheduling
+
+`nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`,
+`imagePullSecrets` and `priorityClassName` pass straight through to the
+Deployment pod spec; `command` and `args` pass through to the container (the
+hardcoded probes expect `/healthz` and `/readyz`, so a custom command must serve
+them). All default to empty. Leader election is enabled by default, so `replicas > 1` won't
+double-reconcile — only the leader acts. For drain safety with `replicas > 1`,
+enable `podDisruptionBudget`: it defaults to `maxUnavailable: 1`, which never
+blocks drains (a single replica can still be evicted, so run `replicas >= 2` to
+keep the controller available). Configs that would block all voluntary drains
+(`minAvailable >= replicas` or `maxUnavailable: 0`) are rejected by design —
+checked at install/upgrade, so runtime scaling is the operator's responsibility.
 
 ## Prometheus Operator integration
 
