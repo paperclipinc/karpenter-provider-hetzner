@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-01
+
+### Fixed
+- Pods bound to an hcloud CSI volume can now trigger provisioning. The hcloud CSI driver pins `PersistentVolume` `nodeAffinity` on `csi.hetzner.cloud/location`, which Karpenter did not recognize, so volume-topology scheduling rejected every PVC-backed pod with `label "csi.hetzner.cloud/location" does not have known values`. That domain is now aliased to the standard `topology.kubernetes.io/zone` via `NormalizedLabels`, mirroring how `karpenter-provider-aws` aliases `topology.ebs.csi.aws.com/zone`. No NodePool or StorageClass changes are needed (#46).
+
+### Added
+- Chart: `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, `imagePullSecrets`, `priorityClassName`, `command` and `args` on the controller Deployment. All empty by default, so existing releases render unchanged (#47).
+- Chart: optional `podDisruptionBudget` (off by default; `maxUnavailable: 1` when enabled). `minAvailable` and `maxUnavailable` are mutually exclusive positive integers, and configurations that would block all voluntary drains (`minAvailable >= replicas`, `maxUnavailable: 0`) are rejected at render time. `replicas` is likewise validated as a non-negative integer (#47).
+
+## [2.0.0] - 2026-07-28
+
+### Changed
+- **BREAKING:** `HCloudNodeClass` graduated from `karpenter.hetzner.cloud/v1alpha1` to `karpenter.hetzner.cloud/v1`. There is no conversion webhook — update `apiVersion` in your manifests and re-apply your node classes (#37).
+
+### Added
+- k3s agent bootstrap support: `examples/k3s-nodeclass.yaml` and `docs/k3s-bootstrap.md`.
+- Artifact Hub repository ID and badge (#32).
+
+### Fixed
+- The chart ships the Karpenter core CRDs (`NodePool`, `NodeClaim`), so a clean install no longer leaves the controller crash-looping on its own watches. Both are vendored from the pinned `sigs.k8s.io/karpenter` during `make generate`, so a dependency bump that changes either schema fails the `generate-verify` CI gate instead of shipping a stale CRD (#44).
+- The operator image is pinned to the chart's `appVersion` instead of floating on `:latest`, so an installed chart runs the operator it was published with (#45).
+- Return `NodeClaimNotFoundError` when deleting an already-gone server, instead of a hard error (#40).
+
+### Changed (dependencies)
+- Bumped `sigs.k8s.io/karpenter`, `hetznercloud/hcloud-go`, and GitHub Actions (#34, #35, #36, #39, #41, #42).
+- CI reads the Go version from `go.mod` instead of pinning it.
+
 ## [1.0.0] - 2026-06-16
 
 First stable release: a complete CloudProvider implementation with full drift
@@ -59,7 +86,10 @@ detection, observability, supply-chain attestations, and adoption docs.
 - Grant full Karpenter-core RBAC in Helm chart (#13).
 - Treat `unsupported location for server type` as an unavailable offering rather than a hard error (#16).
 
-[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/releases/tag/v0.1.0
