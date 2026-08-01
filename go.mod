@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/awslabs/operatorpkg v0.0.0-20260708223819-4da4c353c5fa
-	github.com/hetznercloud/hcloud-go/v2 v2.46.0
+	github.com/hetznercloud/hcloud-go/v2 v2.47.0
 	github.com/prometheus/client_golang v1.24.1
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
