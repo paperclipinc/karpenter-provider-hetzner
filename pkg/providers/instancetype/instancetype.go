@@ -147,24 +147,31 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 	// must list all allowed offerings "even if they're temporarily unavailable", and
 	// treats a running node whose offering has disappeared as drifted, replacing healthy
 	// nodes. Availability, not membership, is what keeps an offering out of selection.
-	creatable := creatableLocations(st)
+	//
+	// Availability is NOT gated on ServerType.Locations[].Available. That flag produces
+	// false negatives: it has been observed reading false for (cx53, nbg1) 50 minutes
+	// after the API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was
+	// created in fsn1, and across all three eu-central locations while eight cx53 nodes
+	// were running. Whatever it reports, it is not "creatable". Gating on it drops those
+	// offerings out of ranking entirely, so a 32Gi pod falls through cx53 (EUR 29.49) to
+	// cpx62 (EUR 129.99) -- a 4.4x regression from the change meant to prevent exactly
+	// that. The unavailable cache covers withdrawn pairs reactively, from real create
+	// failures, and cannot produce a false negative.
 	offerings := make(cloudprovider.Offerings, 0, len(st.Pricings))
 	for _, p := range st.Pricings {
 		if p.Location == nil {
 			continue
 		}
+		// An unpriced offering cannot be ranked, so it is unavailable rather than priced
+		// at 0 -- a 0 sorts as the best deal in the cluster and would win every selection.
 		price, priced := hourlyNetPrice(p)
-		available := priced
-		if ok, known := creatable[p.Location.Name]; known && !ok {
-			available = false
-		}
 		offerings = append(offerings, &cloudprovider.Offering{
 			Requirements: scheduling.NewRequirements(
 				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
 				scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, p.Location.Name),
 			),
 			Price:     price,
-			Available: available,
+			Available: priced,
 		})
 	}
 
@@ -235,25 +242,6 @@ func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) (price float64, ok bool)
 		return v / 730, true
 	}
 	return 0, false
-}
-
-// creatableLocations maps location name to whether hcloud will actually create this
-// server type there. hcloud keeps publishing prices for (type, location) pairs it has
-// withdrawn and reports the real state in ServerType.Locations, so pricing alone
-// overstates what can be launched -- and withdrawn pairs are typically the cheapest,
-// which cheapest-first would target every cycle. A nil map means the API reported no
-// per-location availability, in which case every priced location is assumed creatable.
-func creatableLocations(st *hcloud.ServerType) map[string]bool {
-	if len(st.Locations) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(st.Locations))
-	for _, l := range st.Locations {
-		if l.Location != nil {
-			out[l.Location.Name] = l.Available
-		}
-	}
-	return out
 }
 
 // filterByLocations returns only the instance types that have at least one offering in the requested locations.

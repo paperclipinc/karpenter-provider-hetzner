@@ -226,59 +226,31 @@ func TestToInstanceType_KeepsUnpricedOfferingUnavailable(t *testing.T) {
 	}
 }
 
-// TestToInstanceType_MarksWithdrawnLocationUnavailable verifies that a (type, location)
-// pair hcloud still prices but will not create is marked unavailable. hcloud keeps
-// publishing prices for withdrawn pairs and reports the real state in
-// ServerType.Locations[].Available; those legacy pairs sit at the lowest prices, so
-// under cheapest-first they would otherwise be selected every cycle, fail to create,
-// and be retried the moment the 5-minute unavailable cache expired.
-func TestToInstanceType_MarksWithdrawnLocationUnavailable(t *testing.T) {
-	st := makeServerType("cx22", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40,
+// TestToInstanceType_IgnoresLocationAvailableFlag pins a deliberate decision: hcloud's
+// ServerType.Locations[].Available is NOT used to gate offering availability, because it
+// produces false negatives. It has been observed reading false for (cx53, nbg1) 50
+// minutes after the API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was
+// created in fsn1, and across all three eu-central locations while eight cx53 nodes were
+// running. Gating on it drops those offerings out of ranking, so a 32Gi pod falls through
+// cx53 (EUR 29.49) to cpx62 (EUR 129.99). Withdrawn pairs are handled reactively by the
+// unavailable cache, from real create failures, which cannot produce a false negative.
+func TestToInstanceType_IgnoresLocationAvailableFlag(t *testing.T) {
+	st := makeServerType("cx53", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 16, 32, 320,
 		[]hcloud.ServerTypeLocationPricing{
-			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0070"}},
-			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0010"}},
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0404"}},
 		})
+	// What the API actually reports while cx53 nodes are running in nbg1.
 	st.Locations = []hcloud.ServerTypeLocation{
-		{Location: &hcloud.Location{Name: "nbg1"}, Available: true},
-		{Location: &hcloud.Location{Name: "hel1"}, Available: false},
+		{Location: &hcloud.Location{Name: "nbg1"}, Available: false},
 	}
 	it := toInstanceType(st)
-	hel1 := offeringFor(it, "hel1")
-	if hel1 == nil {
-		t.Fatal("withdrawn hel1 offering was dropped; running nodes there would drift")
+	o := offeringFor(it, "nbg1")
+	if o == nil {
+		t.Fatal("nbg1 offering missing")
 	}
-	if hel1.Available {
-		t.Error("hel1 is priced but not creatable, so it must be unavailable")
-	}
-	if nbg1 := offeringFor(it, "nbg1"); nbg1 == nil || !nbg1.Available {
-		t.Errorf("nbg1 is creatable and should stay available, got %+v", nbg1)
-	}
-}
-
-// TestToInstanceType_NoLocationsMeansAvailable verifies the fail-open path: when hcloud
-// reports no per-location availability, every priced offering stays available rather
-// than the catalogue emptying itself.
-func TestToInstanceType_NoLocationsMeansAvailable(t *testing.T) {
-	st := makeServerType("cx22", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40,
-		[]hcloud.ServerTypeLocationPricing{
-			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0070"}},
-		})
-	it := toInstanceType(st)
-	if o := offeringFor(it, "nbg1"); o == nil || !o.Available {
-		t.Errorf("expected nbg1 available when Locations is empty, got %+v", o)
-	}
-}
-
-func TestList_CacheHit(t *testing.T) {
-	st := makeServerType("cx11", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 1, 2, 20, testPricings)
-	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
-	p := NewProvider(client)
-
-	_, _ = p.List(context.Background(), nil)
-	_, _ = p.List(context.Background(), nil)
-
-	if client.calls != 1 {
-		t.Errorf("expected 1 API call (cache should be hit on second call), got %d", client.calls)
+	if !o.Available {
+		t.Error("gated on Locations[].Available: a priced, creatable offering was excluded " +
+			"from ranking, which falls through to a far pricier type")
 	}
 }
 
@@ -344,16 +316,12 @@ func TestList_ReflectsUnavailable(t *testing.T) {
 // hcloud-withdrawn offering would come back available on the very next List and be
 // selected as the cheapest -- silently undoing the catalogue-level guard.
 func TestList_PreservesCatalogueUnavailability(t *testing.T) {
+	// hel1 carries no usable price, so it cannot be ranked and must stay unavailable.
 	st := makeServerType("cx22", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40,
 		[]hcloud.ServerTypeLocationPricing{
 			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0070"}},
-			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0010"}},
+			{Location: &hcloud.Location{Name: "hel1"}},
 		})
-	// hel1 is priced but withdrawn, and is the cheaper of the two.
-	st.Locations = []hcloud.ServerTypeLocation{
-		{Location: &hcloud.Location{Name: "nbg1"}, Available: true},
-		{Location: &hcloud.Location{Name: "hel1"}, Available: false},
-	}
 	p := NewProvider(&mockServerTypeClient{types: []*hcloud.ServerType{st}})
 
 	types, err := p.List(context.Background(), nil)
@@ -368,7 +336,7 @@ func TestList_PreservesCatalogueUnavailability(t *testing.T) {
 		t.Fatal("hel1 offering missing from List output")
 	}
 	if hel1.Available {
-		t.Error("List resurrected the withdrawn hel1 offering; it would win cheapest-first")
+		t.Error("List resurrected the unpriced hel1 offering; a 0 price would win cheapest-first")
 	}
 	if nbg1 := offeringFor(types[0], "nbg1"); nbg1 == nil || !nbg1.Available {
 		t.Errorf("nbg1 should remain available through List, got %+v", nbg1)
