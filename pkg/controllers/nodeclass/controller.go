@@ -104,6 +104,10 @@ func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (
 	// Image resolution for both architectures.
 	resolved, ierr := c.resolveImages(ctx, nc)
 	if ierr != nil {
+		// Clear rather than leave the previous list in place. Instance-type selection
+		// reads ResolvedImages to decide which architectures are launchable, so a stale
+		// entry keeps steering it at an architecture that no longer has an image.
+		nc.Status.ResolvedImages = nil
 		nc.StatusConditions().SetFalse(apiv1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
 		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
 	} else {

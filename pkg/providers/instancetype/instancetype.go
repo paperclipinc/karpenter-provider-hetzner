@@ -2,6 +2,7 @@ package instancetype
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,7 +114,9 @@ func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*clo
 		for j, o := range it.Offerings {
 			zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
 			cp := *o
-			cp.Available = !p.unavailable.isUnavailable(it.Name, zone)
+			// AND, never overwrite: o.Available already encodes catalogue facts (unpriced
+			// or withdrawn by hcloud) that the capacity cache knows nothing about.
+			cp.Available = o.Available && !p.unavailable.isUnavailable(it.Name, zone)
 			offerings[j] = &cp
 		}
 		// Construct a fresh InstanceType (rather than copying *it) to avoid
@@ -139,20 +142,29 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 
 	cpuType := string(st.CPUType) // "shared" or "dedicated"
 
-	// Build offerings: one per pricing location.
+	// Build offerings: one per pricing location. Every priced location stays in the
+	// catalogue even when it cannot be launched -- karpenter core documents that Offerings
+	// must list all allowed offerings "even if they're temporarily unavailable", and
+	// treats a running node whose offering has disappeared as drifted, replacing healthy
+	// nodes. Availability, not membership, is what keeps an offering out of selection.
+	creatable := creatableLocations(st)
 	offerings := make(cloudprovider.Offerings, 0, len(st.Pricings))
 	for _, p := range st.Pricings {
 		if p.Location == nil {
 			continue
 		}
-		price := hourlyNetPrice(p)
+		price, priced := hourlyNetPrice(p)
+		available := priced
+		if ok, known := creatable[p.Location.Name]; known && !ok {
+			available = false
+		}
 		offerings = append(offerings, &cloudprovider.Offering{
 			Requirements: scheduling.NewRequirements(
 				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
 				scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, p.Location.Name),
 			),
 			Price:     price,
-			Available: true,
+			Available: available,
 		})
 	}
 
@@ -209,15 +221,39 @@ func serverFamily(name string) string {
 // clusters drop the IPv4 charge with HCloudNodeClass.spec.enablePublicIPv4=false.
 //
 // hourlyNetPrice returns the net hourly price for a server-type pricing entry,
-// preferring the explicit hourly figure and falling back to monthly/730.
-func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) float64 {
-	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Hourly.Net), 64); err == nil && v > 0 {
-		return v
+// preferring the explicit hourly figure and falling back to monthly/730. ok is false
+// when neither figure yields a usable price; callers must drop the offering rather
+// than substitute a default, because a zero price ranks as the best deal in the
+// cluster and would win every selection.
+func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) (price float64, ok bool) {
+	// ParseFloat accepts "inf"/"NaN", and an infinite price would sort last forever
+	// rather than being recognised as unusable, so require a finite positive figure.
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Hourly.Net), 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+		return v, true
 	}
-	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Monthly.Net), 64); err == nil {
-		return v / 730
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Monthly.Net), 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+		return v / 730, true
 	}
-	return 0
+	return 0, false
+}
+
+// creatableLocations maps location name to whether hcloud will actually create this
+// server type there. hcloud keeps publishing prices for (type, location) pairs it has
+// withdrawn and reports the real state in ServerType.Locations, so pricing alone
+// overstates what can be launched -- and withdrawn pairs are typically the cheapest,
+// which cheapest-first would target every cycle. A nil map means the API reported no
+// per-location availability, in which case every priced location is assumed creatable.
+func creatableLocations(st *hcloud.ServerType) map[string]bool {
+	if len(st.Locations) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(st.Locations))
+	for _, l := range st.Locations {
+		if l.Location != nil {
+			out[l.Location.Name] = l.Available
+		}
+	}
+	return out
 }
 
 // filterByLocations returns only the instance types that have at least one offering in the requested locations.

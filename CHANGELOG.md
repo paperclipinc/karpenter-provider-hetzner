@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Server type selection now launches the cheapest compatible offering instead of the first type the hcloud API happened to return. Karpenter core already ranks the instance types it sends by price; the provider iterated them in hcloud's own order (ascending server-type id), which puts the pricier CPX family ahead of CX and could buy a type several times the cost of an identically sized alternative. Selection and launch now derive from a single offering, so the location a server is created in — and the `topology.kubernetes.io/zone` label stamped on the node — always match the offering whose price it was ranked on.
+- **Check your NodePools before upgrading.** A NodePool that does not constrain `kubernetes.io/arch` may now get arm64 (CAX) nodes wherever an ARM offering prices below the amd64 ones it permits — the old hcloud-id ordering produced amd64 incidentally, not by policy. Pods with amd64-only images and no arch `nodeSelector` fail on such nodes with `exec format error`. Pin `kubernetes.io/arch: [amd64]` on those NodePools to keep the previous behaviour. The architecture remains the pool's choice, not the provider's: Karpenter core decides which instance types are eligible for the pending pods, and the provider launches the cheapest of the ones core sent.
+
+### Fixed
+- Offerings whose hcloud pricing carries neither a usable hourly nor a usable monthly net figure are marked unavailable rather than priced at zero. A zero price sorts as the best deal available, so one malformed pricing entry would have won every selection under cheapest-first. They stay listed in the catalogue: karpenter core treats an offering that disappears as drift and would replace every healthy node of that type in that location.
+- Offerings for `(server type, location)` pairs hcloud still prices but reports as not creatable (`ServerType.Locations[].Available`) are marked unavailable. Withdrawn pairs keep their published prices and are typically the cheapest, so under cheapest-first they would be selected every cycle, fail to create, and be retried as soon as the unavailable cache expired.
+- Instance-type selection is deterministic when several types tie on price. Karpenter core's `OrderByPrice` sorts with an unstable sort and defines no tiebreak, so tied types were ordered arbitrarily and two NodeClaims from one NodePool could land on different shapes; ties now break on type name.
+- `Create` no longer dead-ends on an instance type whose architecture the `HCloudNodeClass` has no image for. The image is resolved after the type is chosen, so a miss returned a hard error without demoting the type or marking it unavailable, and Karpenter core requeued the same candidate indefinitely. Candidate types are now filtered against `status.resolvedImages`, which the nodeclass controller already populates per architecture — a single-arch cluster is explicitly supported there, and cheapest-first made that combination reachable by default. When no architecture has an image, the error now names the missing image and architecture instead of reporting `InsufficientCapacityError`, which sent operators to their Hetzner quotas for a problem in the NodeClass.
+
 ## [2.1.1] - 2026-08-26
 
 ### Fixed

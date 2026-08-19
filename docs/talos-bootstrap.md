@@ -110,9 +110,21 @@ imageSelector:
 ```
 
 The provider resolves one image per architecture that matches **all** selector
-labels.  If no matching image exists for an architecture that Karpenter wants
-to provision, the provider reports `ImagesReady=False` and logs the missing
-arch — no server is created.  This is the correct safety behavior.
+labels.  Each architecture resolves independently, so a NodeClass stays Ready as
+long as **at least one** does; `ImagesReady=False` means no architecture resolved
+at all.
+
+Selection then skips any instance type whose architecture has no resolved image.
+The consequences differ by NodePool:
+
+- A NodePool permitting several architectures **silently launches one of the
+  others**.  A mislabelled arm64 snapshot does not fail — it quietly yields
+  amd64 nodes, possibly at a higher price.  Watch
+  `karpenter_hetzner_instance_type_skipped_total{reason="no_resolved_image"}`,
+  which counts exactly this.
+- A NodePool pinned to the architecture with no image fails the launch with a
+  `NodeClassNotReady` error naming the missing architecture, and Karpenter
+  deletes the NodeClaim rather than retrying it forever.
 
 For the multi-arch pattern (amd64 + arm64 NodePools sharing one NodeClass), the
 selector label must be present on both the x86 and ARM snapshots.

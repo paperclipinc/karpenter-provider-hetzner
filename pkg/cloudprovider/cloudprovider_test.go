@@ -2,6 +2,7 @@ package cloudprovider_test
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,8 +110,20 @@ func (f *fakeServerTypeClient) All(_ context.Context) ([]*hcloud.ServerType, err
 
 type fakeImageClient struct{ images []*hcloud.Image }
 
-func (f *fakeImageClient) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
-	return f.images, nil
+func (f *fakeImageClient) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	if len(opts.Architecture) == 0 {
+		return f.images, nil
+	}
+	// hcloud filters images by architecture server-side and the provider never
+	// re-filters client-side, so a fake that ignores this hands back wrong-arch images
+	// and hides every arch-related failure.
+	var out []*hcloud.Image
+	for _, img := range f.images {
+		if slices.Contains(opts.Architecture, img.Architecture) {
+			out = append(out, img)
+		}
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -709,30 +722,44 @@ func TestIsDrifted_Labels_Empty(t *testing.T) {
 // Price-based selection
 // ---------------------------------------------------------------------------
 
-// hourlyType builds a compatible x86 server type at the given net hourly/monthly price.
-func hourlyType(name string, cores int, memGB float32, hourly, monthly string) *hcloud.ServerType {
+// armType builds an arm64 server type in nbg1 at the given net hourly price. Cheap ARM
+// candidates recur in these tests because they are what cheapest-first reaches for when a
+// NodePool leaves kubernetes.io/arch unconstrained.
+func armType(name, hourly string) *hcloud.ServerType {
+	return &hcloud.ServerType{
+		Name: name, Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureARM, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{{
+			Location: &hcloud.Location{Name: "nbg1"},
+			Hourly:   hcloud.Price{Net: hourly},
+		}},
+	}
+}
+
+// hourlyType builds a compatible x86 server type in nbg1 at the given net hourly price.
+func hourlyType(name string, cores int, memGB float32, hourly string) *hcloud.ServerType {
 	return &hcloud.ServerType{
 		Name: name, Cores: cores, Memory: memGB, Disk: 160,
 		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
 		Pricings: []hcloud.ServerTypeLocationPricing{{
 			Location: &hcloud.Location{Name: "nbg1"},
 			Hourly:   hcloud.Price{Net: hourly},
-			Monthly:  hcloud.Price{Net: monthly},
 		}},
 	}
 }
 
-// Create must launch the CHEAPEST compatible type, not the first one the Hetzner API
-// happened to return. Hetzner lists server types by ascending id, which puts the
-// expensive CPX family (ids 108-113) ahead of CX (114-117), so a provider that takes
-// the first match buys cpx42 (EUR 69.49) where cx43 (EUR 15.99) fits identically.
+// TestCreate_PicksCheapestCompatibleType verifies that Create launches the cheapest
+// compatible type, not the first one the Hetzner API happened to return. Hetzner lists
+// server types by ascending id, which puts the expensive CPX family (ids 108-113) ahead
+// of CX (114-117), so a provider that takes the first match buys cpx42 (EUR 69.49) where
+// cx43 (EUR 15.99) fits identically.
 func TestCreate_PicksCheapestCompatibleType(t *testing.T) {
 	// Cheapest deliberately in the MIDDLE: a two-element fixture cannot distinguish
 	// "sorted by price" from "reversed the input".
 	types := []*hcloud.ServerType{
-		hourlyType("cpx42", 8, 16, "0.1130", "69.4900"),
-		hourlyType("cx43", 8, 16, "0.0260", "15.9900"),
-		hourlyType("cpx52", 12, 24, "0.1650", "100.4900"),
+		hourlyType("cpx42", 8, 16, "0.1130"),
+		hourlyType("cx43", 8, 16, "0.0260"),
+		hourlyType("cpx52", 12, 24, "0.1650"),
 	}
 	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
 
@@ -747,26 +774,30 @@ func TestCreate_PicksCheapestCompatibleType(t *testing.T) {
 	}
 }
 
-// Create must launch in the CHEAPEST compatible location. OrderByPrice ranks a type by
-// its minimum-priced offering across locations, so selecting the type and then launching
-// at Pricings[0] can bill several times that minimum -- and can be worse than a type that
-// ranked lower. Hetzner prices a given type identically across eu-central today, which
-// keeps this latent there, but it is wrong wherever prices differ per location.
+// TestCreate_LaunchesInCheapestCompatibleLocation verifies that Create launches in the
+// cheapest compatible location and stamps that same location on the NodeClaim's zone
+// label. OrderByPrice ranks a type by its minimum-priced offering across locations, so
+// selecting the type and then launching at Pricings[0] can bill several times that
+// minimum. A zone label taken from a different offering would disagree with where the
+// server actually is, which breaks karpenter core's node pricing and consolidation.
+// Hetzner prices a given type identically across eu-central today, which keeps this
+// latent there, but it is wrong wherever prices differ per location.
 func TestCreate_LaunchesInCheapestCompatibleLocation(t *testing.T) {
 	st := &hcloud.ServerType{
 		Name: "cx43", Cores: 8, Memory: 16, Disk: 160,
 		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
 		Pricings: []hcloud.ServerTypeLocationPricing{
 			// Expensive location listed first, mirroring hcloud Pricings order.
-			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}, Monthly: hcloud.Price{Net: "219.0000"}},
-			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}, Monthly: hcloud.Price{Net: "36.5000"}},
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}},
+			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}},
 		},
 	}
 	nc := baselineNodeClass()
 	nc.Spec.Locations = []string{"nbg1", "hel1"}
 	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{st})
 
-	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+	created, err := cp.Create(context.Background(), createNodeClaim())
+	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if fsc.lastOpts.Location == nil {
@@ -775,41 +806,246 @@ func TestCreate_LaunchesInCheapestCompatibleLocation(t *testing.T) {
 	if got := fsc.lastOpts.Location.Name; got != "hel1" {
 		t.Errorf("expected launch in cheapest location hel1 (0.05/h), got %q (nbg1 is 0.30/h)", got)
 	}
+	if got := created.Labels[corev1.LabelTopologyZone]; got != fsc.lastOpts.Location.Name {
+		t.Errorf("zone label %q disagrees with the launch location %q", got, fsc.lastOpts.Location.Name)
+	}
 }
 
-// A type that is cheaper but does NOT satisfy the NodeClaim must be skipped, not launched.
-// Price ordering puts it first, so this exercises the compatibility filters inside the loop
-// -- the failure mode the ordering change newly makes reachable.
-func TestCreate_SkipsCheaperIncompatibleType(t *testing.T) {
-	// arm64: incompatible with the amd64 NodeClaim below, and cheapest of the three.
-	cheapArm := &hcloud.ServerType{
-		Name: "cax31", Cores: 8, Memory: 16, Disk: 160,
-		Architecture: hcloud.ArchitectureARM, CPUType: hcloud.CPUTypeShared,
-		Pricings: []hcloud.ServerTypeLocationPricing{{
-			Location: &hcloud.Location{Name: "nbg1"},
-			Hourly:   hcloud.Price{Net: "0.0100"}, Monthly: hcloud.Price{Net: "6.0000"},
+// TestCreate_SkipsCheaperExcludedType verifies that a cheaper type the NodeClaim does
+// not admit is passed over rather than launched, whichever requirement key excludes it.
+// Price ordering promotes such a type to the front of selection, so this exercises the
+// requirement filter cheapest-first newly leans on. The instance-type case is the one
+// core actually sends: it narrows node.kubernetes.io/instance-type to the types
+// compatible with the pending pods, which is what keeps architecture core's decision
+// rather than the provider's.
+func TestCreate_SkipsCheaperExcludedType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  karpv1.NodeSelectorRequirementWithMinValues
+	}{
+		{"by arch", karpv1.NodeSelectorRequirementWithMinValues{
+			Key: corev1.LabelArchStable, Operator: corev1.NodeSelectorOpIn,
+			Values: []string{"amd64"},
 		}},
-	}
-	types := []*hcloud.ServerType{
-		cheapArm,
-		hourlyType("cx43", 8, 16, "0.0260", "15.9900"),
-		hourlyType("cpx42", 8, 16, "0.1130", "69.4900"),
-	}
-	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+		{"by core's instance-type list", karpv1.NodeSelectorRequirementWithMinValues{
+			Key: corev1.LabelInstanceTypeStable, Operator: corev1.NodeSelectorOpIn,
+			Values: []string{"cpx42", "cx43"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The expensive admitted type is listed FIRST, so the expected answer is
+			// reachable only by price: an unordered first-match loop would buy cpx42.
+			types := []*hcloud.ServerType{
+				hourlyType("cpx42", 8, 16, "0.1130"),
+				armType("cax31", "0.0100"), // cheapest, excluded by both requirements
+				hourlyType("cx43", 8, 16, "0.0260"),
+			}
+			cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
 
-	nc := createNodeClaim()
-	nc.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+			claim := createNodeClaim()
+			claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{tc.req}
+			if _, err := cp.Create(context.Background(), claim); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if fsc.lastOpts.ServerType == nil {
+				t.Fatal("no server type recorded on create")
+			}
+			if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+				t.Errorf("expected cheapest ADMITTED type cx43, got %q (cax31 is cheaper but excluded)", got)
+			}
+		})
+	}
+}
+
+// TestCreate_HonoursZoneRequirementOverPrice verifies that a zone pinned by the
+// NodeClaim wins over a cheaper offering elsewhere. Every other test here drives Create
+// with an empty requirement set, which makes the Compatible(reqs) filter on the offering
+// a no-op; this is the case that pins it. It matters for PVC-bound pods: commit c9c8096
+// aliases csi.hetzner.cloud/location onto topology.kubernetes.io/zone so a volume's
+// nodeAffinity reaches this filter, and launching in the cheapest other zone instead
+// would strand the volume.
+func TestCreate_HonoursZoneRequirementOverPrice(t *testing.T) {
+	st := &hcloud.ServerType{
+		Name: "cx43", Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}},
+			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}},
+		},
+	}
+	nc := baselineNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "hel1"}
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{st})
+
+	// Pin the EXPENSIVE zone: only the Compatible(reqs) filter can produce this answer.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
 		{
-			Key:      corev1.LabelArchStable,
+			Key:      corev1.LabelTopologyZone,
 			Operator: corev1.NodeSelectorOpIn,
-			Values:   []string{"amd64"},
+			Values:   []string{"nbg1"},
 		},
 	}
 
-	if _, err := cp.Create(context.Background(), nc); err != nil {
+	created, err := cp.Create(context.Background(), claim)
+	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	if fsc.lastOpts.Location == nil {
+		t.Fatal("no location recorded on create")
+	}
+	if got := fsc.lastOpts.Location.Name; got != "nbg1" {
+		t.Errorf("expected the required zone nbg1, got %q (hel1 is cheaper but not allowed)", got)
+	}
+	if got := created.Labels[corev1.LabelTopologyZone]; got != "nbg1" {
+		t.Errorf("zone label = %q, want nbg1", got)
+	}
+}
+
+// TestCreate_SkipsArchWithoutResolvedImage verifies that Create walks past a cheaper
+// instance type whose architecture the NodeClass has no image for, instead of
+// dead-ending on it. The nodeclass controller deliberately marks a NodeClass Ready when
+// only ONE architecture resolves ("an all-amd64 cluster has no arm64 Talos snapshot"),
+// so an x86-only catalog is a supported configuration -- and cheapest-first selection
+// steers into it whenever a pool permits both architectures and the ARM candidate
+// prices lower for the requested shape. Create breaks
+// out of the selection loop before resolving the image, so without this filter the miss
+// is terminal: the type is never demoted, never marked unavailable, and karpenter core
+// requeues the same doomed candidate forever while cx43 sits one iteration away.
+func TestCreate_SkipsArchWithoutResolvedImage(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	// Exactly what resolveImages records for an x86-only image catalog.
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
+	}
+	types := []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")}
+	cp, fsc, _ := buildCPWithTypes(t, nc, types)
+
+	// No arch requirement: the NodeClaim itself permits arm64, so only the
+	// resolved-image filter can keep Create off cax31.
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.ServerType == nil {
+		t.Fatal("no server type recorded on create")
+	}
 	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
-		t.Errorf("expected cheapest COMPATIBLE type cx43, got %q (cax31 is cheaper but arm64)", got)
+		t.Errorf("expected cx43, the cheapest type with a resolved image, got %q", got)
+	}
+}
+
+// TestCreate_ReportsMissingImageNotCapacity verifies that a NodeClaim blocked purely by
+// a missing image reports that, rather than InsufficientCapacityError. The two need
+// different responses: capacity is transient and worth a backoff retry, a missing image
+// is a configuration problem that no amount of retrying fixes. Reporting it as capacity
+// sends operators to their Hetzner quotas for a problem that lives in the NodeClass.
+// This is reachable whenever a NodeClass resolves only some architectures -- which the
+// nodeclass controller explicitly supports -- and a NodePool pins one of the others.
+func TestCreate_ReportsMissingImageNotCapacity(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
+	}
+	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
+
+	// An arm64 NodePool on a NodeClass that only resolved an amd64 image.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelArchStable,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"arm64"},
+		},
+	}
+
+	_, err := cp.Create(context.Background(), claim)
+	if err == nil {
+		t.Fatal("expected an error when no architecture has a resolved image")
+	}
+	// Assert the TYPE, not just "not capacity": core switches on it in launch.go. A bare
+	// error falls to the default branch, which parks the NodeClaim in Launched=Unknown and
+	// requeues it forever; NodeClassNotReady deletes the claim so the scheduler can try a
+	// different shape. Asserting only "not an ICE" also passes for the pre-fix dead-end
+	// error from imageProvider.Resolve, which says "image" and "arm" too.
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "has no resolved image for architecture") {
+		t.Errorf("error should name the missing resolved image, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), string(hcloud.ArchitectureARM)) {
+		t.Errorf("error should name the architecture, got: %v", err)
+	}
+}
+
+// TestCreate_PrefersCapacityErrorWhenBothBlock verifies that a candidate which cleared
+// the image gate and failed only for want of an available offering still yields
+// InsufficientCapacityError, even though a different candidate was image-blocked.
+// Capacity carries core's retry and MarkUnavailable semantics, so an unrelated missing
+// image must not mask a candidate that a retry could actually satisfy.
+func TestCreate_PrefersCapacityErrorWhenBothBlock(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	// arm64 has no image; amd64 does, so cx43 reaches the offering check.
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
+	}
+	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
+
+	// Both types are offered only in nbg1, so pinning hel1 leaves cx43 with no
+	// compatible offering: image-eligible, capacity-blocked.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelTopologyZone,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"hel1"},
+		},
+	}
+
+	_, err := cp.Create(context.Background(), claim)
+	if err == nil {
+		t.Fatal("expected an error when no offering is available")
+	}
+	if !karpcp.IsInsufficientCapacityError(err) {
+		t.Errorf("expected InsufficientCapacityError, got %v", err)
+	}
+}
+
+// TestCreate_TieBreaksDeterministically verifies that two types tied on cheapest price
+// resolve to the same one every time. karpenter core's OrderByPrice sorts with the
+// unstable sort.Slice and has no tiebreak, so tied types come out in an order that
+// shifts when an unrelated type is added or an offering's availability flips -- two
+// NodeClaims from one NodePool could land on different CPU shapes or architectures,
+// failing a Deployment on some replicas and not others. Ties break on name here.
+func TestCreate_TieBreaksDeterministically(t *testing.T) {
+	tied := func(name string, arch hcloud.Architecture) *hcloud.ServerType {
+		return &hcloud.ServerType{
+			Name: name, Cores: 8, Memory: 16, Disk: 160,
+			Architecture: arch, CPUType: hcloud.CPUTypeShared,
+			Pricings: []hcloud.ServerTypeLocationPricing{{
+				Location: &hcloud.Location{Name: "nbg1"},
+				Hourly:   hcloud.Price{Net: "0.0260"},
+			}},
+		}
+	}
+	// Same two tied types, presented in different catalogue orders and with a differing
+	// number of pricier decoys, which is what perturbs an unstable sort's pivot choice.
+	orders := [][]*hcloud.ServerType{
+		{tied("cpx41", hcloud.ArchitectureX86), tied("ccx13", hcloud.ArchitectureX86)},
+		{tied("ccx13", hcloud.ArchitectureX86), tied("cpx41", hcloud.ArchitectureX86)},
+		{hourlyType("cpx52", 12, 24, "0.9000"), tied("cpx41", hcloud.ArchitectureX86),
+			hourlyType("cpx62", 16, 32, "0.9900"), tied("ccx13", hcloud.ArchitectureX86)},
+	}
+	for i, types := range orders {
+		cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+		if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+			t.Fatalf("order %d: Create: %v", i, err)
+		}
+		if got := fsc.lastOpts.ServerType.Name; got != "ccx13" {
+			t.Errorf("order %d: tie resolved to %q, want the deterministic winner ccx13", i, got)
+		}
 	}
 }

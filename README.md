@@ -109,9 +109,12 @@ spec:
         kind: HCloudNodeClass
         name: default
       requirements:
+        # Pinned to amd64 so this pool never picks an architecture your images may
+        # not have. Add arm64 (and see examples/nodepool-multiarch.yaml) once your
+        # images are published as multi-arch manifests.
         - key: kubernetes.io/arch
           operator: In
-          values: [amd64, arm64]
+          values: [amd64]
         - key: karpenter.hetzner.cloud/server-family
           operator: In
           values: [cax, cpx]
@@ -184,7 +187,7 @@ comments explaining every field.
 
 - Pricing uses the **net** hourly figure, so relative comparisons match your Hetzner invoice (before VAT).
 - Hetzner bills the primary IPv4 separately. On private-network clusters, set `enablePublicIPv4: false` to drop it.
-- ARM (CAX) types are typically the best price/performance; constrain `kubernetes.io/arch` or `server-family` in the NodePool to steer Karpenter.
+- Selection is cheapest-first, so a NodePool that permits several architectures or families gets whichever priced offering is cheapest for the requested shape — which may be ARM (CAX). Constrain `kubernetes.io/arch` or `server-family` to steer Karpenter, and publish multi-arch images before allowing arm64.
 
 ## Development
 

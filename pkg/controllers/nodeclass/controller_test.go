@@ -152,6 +152,39 @@ func TestReconcile_ImageResolutionFails(t *testing.T) {
 	if got.StatusConditions().Root().IsTrue() {
 		t.Error("Ready should not be true when images fail to resolve")
 	}
+	// Status must not keep advertising images that no longer resolve: instance-type
+	// selection reads ResolvedImages to decide which architectures are launchable, so a
+	// stale entry routes it at an architecture that cannot boot.
+	if len(got.Status.ResolvedImages) != 0 {
+		t.Errorf("expected ResolvedImages cleared when no architecture resolves, got %+v", got.Status.ResolvedImages)
+	}
+}
+
+// TestReconcile_ClearsStaleResolvedImages verifies that images resolved on an earlier
+// pass are removed once resolution stops succeeding, rather than lingering in status.
+func TestReconcile_ClearsStaleResolvedImages(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: "x86", ImageID: 42},
+		{Architecture: "arm", ImageID: 43},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(emptyImages{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.ResolvedImages) != 0 {
+		t.Errorf("stale resolved images survived a failed resolution: %+v", got.Status.ResolvedImages)
+	}
 }
 
 func TestReconcile_NetworkNotFound(t *testing.T) {

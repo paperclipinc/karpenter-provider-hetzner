@@ -62,6 +62,15 @@ var (
 		Help:      "Total number of drift detections by reason.",
 	}, []string{"reason"})
 
+	// instanceTypeSkippedTotal counts instance types passed over during selection, by
+	// architecture and reason. The common case is non-terminal -- a cheaper candidate is
+	// skipped and a pricier one launches -- so nothing else in the system reveals it.
+	instanceTypeSkippedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "instance_type_skipped_total",
+		Help:      "Total number of instance types skipped during selection, by architecture and reason.",
+	}, []string{"arch", "reason"})
+
 	// instanceTypeCacheTotal counts instance-type cache lookups by result (hit|miss).
 	instanceTypeCacheTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "karpenter_hetzner",
@@ -78,6 +87,7 @@ func init() {
 		hcloudAPICallsTotal,
 		driftDetectedTotal,
 		instanceTypeCacheTotal,
+		instanceTypeSkippedTotal,
 	)
 }
 
@@ -100,6 +110,12 @@ func RecordServerDelete(result string) {
 // (e.g. "ImageDrift", "NetworkDrift").
 func RecordDrift(reason string) {
 	driftDetectedTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordInstanceTypeSkipped records that an instance type was passed over during
+// selection, e.g. reason "no_resolved_image".
+func RecordInstanceTypeSkipped(arch, reason string) {
+	instanceTypeSkippedTotal.WithLabelValues(arch, reason).Inc()
 }
 
 // RecordCacheHit records an instance-type cache hit.

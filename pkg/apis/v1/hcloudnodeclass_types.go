@@ -95,6 +95,11 @@ type ImageSelector struct {
 }
 
 type ResolvedImage struct {
+	// Architecture is the hcloud architecture spelling ("x86" or "arm"), not the
+	// Kubernetes one ("amd64"/"arm64"). Instance-type selection compares this value
+	// exactly, so an unrecognised spelling would make every architecture ineligible
+	// while all conditions stayed green.
+	// +kubebuilder:validation:Enum=x86;arm
 	Architecture string `json:"architecture"`
 	ImageID      int64  `json:"imageID"`
 }

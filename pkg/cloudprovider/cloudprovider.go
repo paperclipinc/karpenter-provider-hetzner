@@ -3,7 +3,9 @@ package cloudprovider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/awslabs/operatorpkg/status"
@@ -85,6 +87,30 @@ func (cp *CloudProvider) RepairPolicies() []karpcp.RepairPolicy {
 	}
 }
 
+// hcloudArchFor maps an instance type's kubernetes.io/arch value onto the hcloud
+// architecture used for image lookups.
+func hcloudArchFor(it *karpcp.InstanceType) hcloud.Architecture {
+	if it.Requirements.Get(corev1.LabelArchStable).Any() == "arm64" {
+		return hcloud.ArchitectureARM
+	}
+	return hcloud.ArchitectureX86
+}
+
+// hasResolvedImage reports whether the NodeClass resolved an image for arch. An empty
+// list means the nodeclass controller has not reported yet, so every architecture stays
+// eligible: filtering on absent status would block provisioning entirely.
+func hasResolvedImage(nodeClass *apiv1.HCloudNodeClass, arch hcloud.Architecture) bool {
+	if len(nodeClass.Status.ResolvedImages) == 0 {
+		return true
+	}
+	for _, ri := range nodeClass.Status.ResolvedImages {
+		if ri.Architecture == string(arch) {
+			return true
+		}
+	}
+	return false
+}
+
 // Create provisions a new Hetzner server for the given NodeClaim.
 func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim) (*karpv1.NodeClaim, error) {
 	log := logf.FromContext(ctx)
@@ -94,6 +120,13 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	}
 
 	// Get instance types for the node class locations.
+	//
+	// NOTE: this reads the provider's own catalogue. When the NodeOverlay feature gate is
+	// enabled, cmd/controller wraps this provider in karpenter's overlay.Decorate, which
+	// overrides GetInstanceTypes but inherits Create unchanged -- so core ranks types on
+	// overlaid prices while the selection below ranks on raw hcloud prices, and the two
+	// can disagree. The decorator wraps from outside, so Create cannot reach the overlaid
+	// view; closing the gap needs core to decorate Create too. The gate defaults off.
 	instanceTypes, err := cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
 	if err != nil {
 		return nil, fmt.Errorf("listing instance types: %w", err)
@@ -101,31 +134,79 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Filter instance types by NodeClaim requirements.
 	reqs := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
+	// offering is the one selected was ranked on, and therefore the one it is launched
+	// into: deriving both from a single expression keeps the price we chose on and the
+	// price we pay identical.
 	var selected *karpcp.InstanceType
-	// Cheapest-first: OrderByPrice ranks by the lowest Available, requirement-compatible
-	// offering, so the first match below is the cheapest type that fits. Without this the
-	// loop takes whatever order the Hetzner API returned (ascending server-type id), which
-	// puts the expensive CPX family ahead of CX.
-	for _, it := range karpcp.InstanceTypes(instanceTypes).OrderByPrice(reqs) {
+	var offering *karpcp.Offering
+	// Distinguish the two ways selection can come up empty. A missing image is a
+	// NodeClass configuration problem that no retry fixes; no available offering is
+	// transient capacity. They need different errors, and core retries them differently.
+	var archsMissingImages []hcloud.Architecture
+	capacityBlocked := false
+	// Explicit min-scan rather than core's OrderByPrice: that helper sorts with the
+	// unstable sort.Slice and defines no tiebreak, so types tied on price come out in an
+	// order that shifts when an unrelated type is added or an offering's availability
+	// flips -- two NodeClaims from one NodePool could land on different shapes. Ties break
+	// on name here, so selection is reproducible from the same catalogue. Scanning also
+	// avoids re-deriving every type's price inside a sort comparator.
+	for _, it := range instanceTypes {
 		if !reqs.IsCompatible(it.Requirements, scheduling.AllowUndefinedWellKnownLabels) {
 			continue
 		}
-		if !it.Offerings.Available().HasCompatible(reqs) {
+		// Skip architectures the NodeClass has no image for. The image is resolved after
+		// this loop breaks, so a miss there is terminal: nothing demotes the type or marks
+		// it unavailable, and core requeues the same candidate forever. Cheapest-first
+		// makes that reachable whenever a pool permits both architectures and the ARM
+		// candidate prices lower, while a single-arch cluster is explicitly supported
+		// (see resolveImages).
+		if arch := hcloudArchFor(it); !hasResolvedImage(nodeClass, arch) {
+			if !slices.Contains(archsMissingImages, arch) {
+				archsMissingImages = append(archsMissingImages, arch)
+			}
+			// Usually non-terminal: a cheaper candidate is dropped and a pricier one
+			// launches, so the error below never fires and nothing else would show that
+			// a mislabelled image is quietly costing money.
+			log.V(1).Info("skipping instance type: node class has no resolved image",
+				"instanceType", it.Name, "arch", string(arch), "nodeClass", nodeClass.Name)
+			metrics.RecordInstanceTypeSkipped(string(arch), "no_resolved_image")
 			continue
 		}
-		selected = it
-		break
+		cheapest := it.Offerings.Available().Compatible(reqs).Cheapest()
+		if cheapest == nil {
+			capacityBlocked = true
+			continue
+		}
+		if selected == nil || cheapest.Price < offering.Price ||
+			(cheapest.Price == offering.Price && it.Name < selected.Name) {
+			selected, offering = it, cheapest
+		}
 	}
 	if selected == nil {
+		// Only claim capacity when a candidate cleared the image gate and still had no
+		// offering. Otherwise the image is the whole story, and dressing it as capacity
+		// sends operators to their Hetzner quotas for a problem in the NodeClass.
+		if len(archsMissingImages) > 0 && !capacityBlocked {
+			archs := make([]string, len(archsMissingImages))
+			for i, a := range archsMissingImages {
+				archs[i] = string(a)
+			}
+			// NodeClassNotReady, not a bare error: core switches on the type in launch.go.
+			// Both this and InsufficientCapacity delete the NodeClaim so the scheduler can
+			// try another shape; anything else parks it in Launched=Unknown and requeues
+			// forever. This branch also reports reason=nodeclass_not_ready rather than
+			// blaming capacity.
+			slices.Sort(archs)
+			return nil, karpcp.NewNodeClassNotReadyError(fmt.Errorf(
+				"no instance type satisfies requirements for nodeclaim %s: HCloudNodeClass %q has no resolved image for architecture %s",
+				nodeClaim.Name, nodeClass.Name, strings.Join(archs, ", ")))
+		}
 		return nil, karpcp.NewInsufficientCapacityError(fmt.Errorf("no instance type satisfies requirements for nodeclaim %s", nodeClaim.Name))
 	}
 
 	// Determine architecture from the selected instance type.
 	arch := selected.Requirements.Get(corev1.LabelArchStable).Any()
-	hcloudArch := hcloud.ArchitectureX86
-	if arch == "arm64" {
-		hcloudArch = hcloud.ArchitectureARM
-	}
+	hcloudArch := hcloudArchFor(selected)
 	log.Info("selected instance type", "instanceType", selected.Name, "arch", arch)
 
 	// Resolve OS image.
@@ -140,15 +221,9 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		return nil, fmt.Errorf("resolved image %d has arch %q but nodeclaim requires %q", image.ID, image.Architecture, hcloudArch)
 	}
 
-	// Launch in the CHEAPEST compatible offering's location. OrderByPrice above ranks a type
-	// by its minimum-priced offering across locations, so taking the first offering here
-	// could bill several times that minimum -- and could cost more than a type that ranked
-	// lower. Cheapest() returns nil for an empty set, falling through to the NodeClass default.
-	var location string
-	cheapestOffering := selected.Offerings.Available().Compatible(reqs).Cheapest()
-	if cheapestOffering != nil {
-		location = cheapestOffering.Requirements.Get(corev1.LabelTopologyZone).Any()
-	}
+	// Launch in the offering's location: the type was ranked by that offering's price, so
+	// launching anywhere else can bill a multiple of the price it was chosen on.
+	location := offering.Zone()
 	if location == "" && len(nodeClass.Spec.Locations) > 0 {
 		location = nodeClass.Spec.Locations[0]
 	}
@@ -193,15 +268,11 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 			labels[key] = req.Values()[0]
 		}
 	}
-	// Overlay offering-specific labels (zone, capacity-type) from the SAME offering the
-	// server was launched into. Taking them from a different offering would stamp a zone
-	// label that disagrees with where the server actually is, which silently breaks any
-	// consumer that resolves an offering by the node's zone (notably karpenter core's
-	// node pricing, and therefore consolidation).
-	if cheapestOffering != nil {
-		for _, req := range cheapestOffering.Requirements {
-			labels[req.Key] = req.Any()
-		}
+	// Overlay offering-specific labels (zone, capacity-type) from the offering the server
+	// was launched into, so the zone label always matches where the server actually is:
+	// karpenter core resolves a node's offering by that label to price it for consolidation.
+	for _, req := range offering.Requirements {
+		labels[req.Key] = req.Any()
 	}
 	// Merge existing NodeClaim labels.
 	for k, v := range nodeClaim.Labels {
