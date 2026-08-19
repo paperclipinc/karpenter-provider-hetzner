@@ -102,7 +102,11 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	// Filter instance types by NodeClaim requirements.
 	reqs := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
 	var selected *karpcp.InstanceType
-	for _, it := range instanceTypes {
+	// Cheapest-first: OrderByPrice ranks by the lowest Available, requirement-compatible
+	// offering, so the first match below is the cheapest type that fits. Without this the
+	// loop takes whatever order the Hetzner API returned (ascending server-type id), which
+	// puts the expensive CPX family ahead of CX.
+	for _, it := range karpcp.InstanceTypes(instanceTypes).OrderByPrice(reqs) {
 		if !reqs.IsCompatible(it.Requirements, scheduling.AllowUndefinedWellKnownLabels) {
 			continue
 		}
@@ -136,11 +140,14 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 		return nil, fmt.Errorf("resolved image %d has arch %q but nodeclaim requires %q", image.ID, image.Architecture, hcloudArch)
 	}
 
-	// Pick the first compatible offering to determine the location.
+	// Launch in the CHEAPEST compatible offering's location. OrderByPrice above ranks a type
+	// by its minimum-priced offering across locations, so taking the first offering here
+	// could bill several times that minimum -- and could cost more than a type that ranked
+	// lower. Cheapest() returns nil for an empty set, falling through to the NodeClass default.
 	var location string
-	compatibleOfferings := selected.Offerings.Available().Compatible(reqs)
-	if len(compatibleOfferings) > 0 {
-		location = compatibleOfferings[0].Requirements.Get(corev1.LabelTopologyZone).Any()
+	cheapestOffering := selected.Offerings.Available().Compatible(reqs).Cheapest()
+	if cheapestOffering != nil {
+		location = cheapestOffering.Requirements.Get(corev1.LabelTopologyZone).Any()
 	}
 	if location == "" && len(nodeClass.Spec.Locations) > 0 {
 		location = nodeClass.Spec.Locations[0]
@@ -186,9 +193,13 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 			labels[key] = req.Values()[0]
 		}
 	}
-	// Overlay offering-specific labels (zone, capacity-type).
-	if len(compatibleOfferings) > 0 {
-		for _, req := range compatibleOfferings[0].Requirements {
+	// Overlay offering-specific labels (zone, capacity-type) from the SAME offering the
+	// server was launched into. Taking them from a different offering would stamp a zone
+	// label that disagrees with where the server actually is, which silently breaks any
+	// consumer that resolves an offering by the node's zone (notably karpenter core's
+	// node pricing, and therefore consolidation).
+	if cheapestOffering != nil {
+		for _, req := range cheapestOffering.Requirements {
 			labels[req.Key] = req.Any()
 		}
 	}

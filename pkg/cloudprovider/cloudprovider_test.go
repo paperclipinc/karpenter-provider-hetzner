@@ -704,3 +704,112 @@ func TestIsDrifted_Labels_Empty(t *testing.T) {
 		t.Errorf("expected no drift for empty spec labels, got %q", reason)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Price-based selection
+// ---------------------------------------------------------------------------
+
+// hourlyType builds a compatible x86 server type at the given net hourly/monthly price.
+func hourlyType(name string, cores int, memGB float32, hourly, monthly string) *hcloud.ServerType {
+	return &hcloud.ServerType{
+		Name: name, Cores: cores, Memory: memGB, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{{
+			Location: &hcloud.Location{Name: "nbg1"},
+			Hourly:   hcloud.Price{Net: hourly},
+			Monthly:  hcloud.Price{Net: monthly},
+		}},
+	}
+}
+
+// Create must launch the CHEAPEST compatible type, not the first one the Hetzner API
+// happened to return. Hetzner lists server types by ascending id, which puts the
+// expensive CPX family (ids 108-113) ahead of CX (114-117), so a provider that takes
+// the first match buys cpx42 (EUR 69.49) where cx43 (EUR 15.99) fits identically.
+func TestCreate_PicksCheapestCompatibleType(t *testing.T) {
+	// Cheapest deliberately in the MIDDLE: a two-element fixture cannot distinguish
+	// "sorted by price" from "reversed the input".
+	types := []*hcloud.ServerType{
+		hourlyType("cpx42", 8, 16, "0.1130", "69.4900"),
+		hourlyType("cx43", 8, 16, "0.0260", "15.9900"),
+		hourlyType("cpx52", 12, 24, "0.1650", "100.4900"),
+	}
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.ServerType == nil {
+		t.Fatal("no server type recorded on create")
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Errorf("expected cheapest compatible type cx43 (EUR 15.99/mo), got %q (cpx42 is EUR 69.49/mo)", got)
+	}
+}
+
+// Create must launch in the CHEAPEST compatible location. OrderByPrice ranks a type by
+// its minimum-priced offering across locations, so selecting the type and then launching
+// at Pricings[0] can bill several times that minimum -- and can be worse than a type that
+// ranked lower. Hetzner prices a given type identically across eu-central today, which
+// keeps this latent there, but it is wrong wherever prices differ per location.
+func TestCreate_LaunchesInCheapestCompatibleLocation(t *testing.T) {
+	st := &hcloud.ServerType{
+		Name: "cx43", Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{
+			// Expensive location listed first, mirroring hcloud Pricings order.
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}, Monthly: hcloud.Price{Net: "219.0000"}},
+			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}, Monthly: hcloud.Price{Net: "36.5000"}},
+		},
+	}
+	nc := baselineNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "hel1"}
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{st})
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Location == nil {
+		t.Fatal("no location recorded on create")
+	}
+	if got := fsc.lastOpts.Location.Name; got != "hel1" {
+		t.Errorf("expected launch in cheapest location hel1 (0.05/h), got %q (nbg1 is 0.30/h)", got)
+	}
+}
+
+// A type that is cheaper but does NOT satisfy the NodeClaim must be skipped, not launched.
+// Price ordering puts it first, so this exercises the compatibility filters inside the loop
+// -- the failure mode the ordering change newly makes reachable.
+func TestCreate_SkipsCheaperIncompatibleType(t *testing.T) {
+	// arm64: incompatible with the amd64 NodeClaim below, and cheapest of the three.
+	cheapArm := &hcloud.ServerType{
+		Name: "cax31", Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureARM, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{{
+			Location: &hcloud.Location{Name: "nbg1"},
+			Hourly:   hcloud.Price{Net: "0.0100"}, Monthly: hcloud.Price{Net: "6.0000"},
+		}},
+	}
+	types := []*hcloud.ServerType{
+		cheapArm,
+		hourlyType("cx43", 8, 16, "0.0260", "15.9900"),
+		hourlyType("cpx42", 8, 16, "0.1130", "69.4900"),
+	}
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+
+	nc := createNodeClaim()
+	nc.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelArchStable,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"amd64"},
+		},
+	}
+
+	if _, err := cp.Create(context.Background(), nc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Errorf("expected cheapest COMPATIBLE type cx43, got %q (cax31 is cheaper but arm64)", got)
+	}
+}
