@@ -228,12 +228,14 @@ func TestToInstanceType_KeepsUnpricedOfferingUnavailable(t *testing.T) {
 
 // TestToInstanceType_IgnoresLocationAvailableFlag pins a deliberate decision: hcloud's
 // ServerType.Locations[].Available is NOT used to gate offering availability, because it
-// produces false negatives. It has been observed reading false for (cx53, nbg1) 50
-// minutes after the API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was
-// created in fsn1, and across all three eu-central locations while eight cx53 nodes were
-// running. Gating on it drops those offerings out of ranking, so a 32Gi pod falls through
-// cx53 (EUR 29.49) to cpx62 (EUR 129.99). Withdrawn pairs are handled reactively by the
-// unavailable cache, from real create failures, which cannot produce a false negative.
+// is wrong in both directions. False negatives: observed reading false for (cx53, nbg1)
+// 50 minutes after the API accepted a cx53 create there, and across all three eu-central
+// locations while eight cx53 nodes were running. False positives: a datacenter reporting
+// cx43 as available and available_for_migration still rejected the create with
+// resource_unavailable. Gating on it drops good offerings out of ranking, so a 32Gi pod
+// falls through cx53 (EUR 29.49) to cpx62 (EUR 129.99). Withdrawn pairs are handled
+// reactively by the unavailable cache, which marks a pair only after a real create
+// failure and so cannot be fooled either way.
 func TestToInstanceType_IgnoresLocationAvailableFlag(t *testing.T) {
 	st := makeServerType("cx53", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 16, 32, 320,
 		[]hcloud.ServerTypeLocationPricing{

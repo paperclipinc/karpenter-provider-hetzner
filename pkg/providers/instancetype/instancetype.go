@@ -43,7 +43,12 @@ func NewProvider(client ServerTypeClient) *Provider {
 		client: client,
 		unavailable: newUnavailableCache(
 			// 5m: long enough to route around a saturated location, short enough to
-			// retry it soon. TODO: make configurable via operator config if needed.
+			// retry it soon. Matches observed recovery -- a resource_unavailable on
+			// (cx43, hel1) cleared within minutes, an identical create succeeding ~70s
+			// later. A long quarantine would keep falling through to a ~4x-priced type
+			// well after capacity returned, so if this is ever tuned, prefer a short base
+			// with backoff on repeat failures over a longer flat TTL.
+			// TODO: make configurable via operator config if needed.
 			5 * time.Minute,
 		),
 	}
@@ -148,15 +153,24 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 	// treats a running node whose offering has disappeared as drifted, replacing healthy
 	// nodes. Availability, not membership, is what keeps an offering out of selection.
 	//
-	// Availability is NOT gated on ServerType.Locations[].Available. That flag produces
-	// false negatives: it has been observed reading false for (cx53, nbg1) 50 minutes
-	// after the API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was
-	// created in fsn1, and across all three eu-central locations while eight cx53 nodes
-	// were running. Whatever it reports, it is not "creatable". Gating on it drops those
-	// offerings out of ranking entirely, so a 32Gi pod falls through cx53 (EUR 29.49) to
+	// Availability is NOT gated on ServerType.Locations[].Available. That flag is wrong in
+	// BOTH directions, so no reading of it is safe:
+	//
+	//   false negatives -- observed reading false for (cx53, nbg1) 50 minutes after the
+	//   API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was created in
+	//   fsn1, and across all three eu-central locations while eight cx53 nodes ran.
+	//
+	//   false positives -- hcloud datacenter describe hel1-dc2 listed cx43 in both
+	//   server_types.available and available_for_migration, and the create was still
+	//   rejected with resource_unavailable; an identical request minutes later succeeded.
+	//
+	// It carries no signal about whether a server can be created, so gating on it
+	// proactively is unsound whichever way it is interpreted. Excluding those offerings
+	// drops them out of ranking entirely, so a 32Gi pod falls through cx53 (EUR 29.49) to
 	// cpx62 (EUR 129.99) -- a 4.4x regression from the change meant to prevent exactly
-	// that. The unavailable cache covers withdrawn pairs reactively, from real create
-	// failures, and cannot produce a false negative.
+	// that. Withdrawn pairs are handled reactively by the unavailable cache, which marks
+	// a pair only after a real create failure and so cannot be fooled in either
+	// direction.
 	offerings := make(cloudprovider.Offerings, 0, len(st.Pricings))
 	for _, p := range st.Pricings {
 		if p.Location == nil {
