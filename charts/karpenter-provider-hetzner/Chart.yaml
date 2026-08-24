@@ -2,7 +2,7 @@ apiVersion: v2
 name: karpenter-provider-hetzner
 description: Karpenter cloud provider for Hetzner Cloud
 type: application
-version: 2.1.0
+version: 2.2.0
 appVersion: "2.1.0"
 # home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
@@ -31,7 +31,5 @@ annotations:
   artifacthub.io/category: integration-delivery
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
-    - kind: fixed
-      description: "Pods bound to an hcloud CSI volume can now trigger provisioning: csi.hetzner.cloud/location is aliased to topology.kubernetes.io/zone"
     - kind: added
-      description: "Expose nodeSelector, affinity, tolerations, topologySpreadConstraints, imagePullSecrets, priorityClassName, command, args and an optional PodDisruptionBudget (minAvailable or maxUnavailable) on the Deployment via chart values"
+      description: "Reclaim Hetzner servers Karpenter no longer has a NodeClaim for, which would otherwise run and bill unowned; pause the sweep with instanceGarbageCollection.disabled during maintenance that removes NodeClaims wholesale"

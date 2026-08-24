@@ -5,7 +5,8 @@
 // shared Registry so they coexist safely with karpenter-core metrics.
 // Callers import this package for its side-effects and then invoke the helper
 // functions (RecordServerCreate, RecordServerDelete, RecordDrift,
-// RecordCacheHit, RecordCacheMiss) to instrument hot paths.
+// RecordCacheHit, RecordCacheMiss, RecordOrphanGC, RecordServerAdopt) to
+// instrument hot paths.
 package metrics
 
 import (
@@ -45,6 +46,27 @@ var (
 		Help:      "Total number of Hetzner server delete calls by result.",
 	}, []string{"result"})
 
+	// orphanGCTotal counts orphaned-server sweep outcomes. "reaped" and "error"
+	// are terminal; the "skipped_*" results mark a server the sweep declined to
+	// act on, which would otherwise be visible only as a log line repeated every
+	// resync interval for as long as the server bills.
+	orphanGCTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "orphaned_server_gc_total",
+		Help:      "Outcomes of the orphaned-server garbage collection sweep.",
+	}, []string{"result"})
+
+	// serverAdoptTotal counts attempts to recover a server by name after a create
+	// call whose result was lost. Adoptions return through Create, so without this
+	// they are indistinguishable from ordinary successful creates -- and the
+	// "declined" and "error" results matter just as much, since a NodeClaim
+	// retrying into a collision adoption keeps refusing is otherwise invisible.
+	serverAdoptTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "server_adopt_total",
+		Help:      "Outcomes of adopting a pre-existing Hetzner server after a name collision.",
+	}, []string{"result"})
+
 	// hcloudAPICallsTotal counts hcloud API calls by operation and result. We
 	// scope it to the operations we actually instrument (server_create,
 	// server_delete, placement_group, image_list) to keep label cardinality
@@ -78,7 +100,41 @@ func init() {
 		hcloudAPICallsTotal,
 		driftDetectedTotal,
 		instanceTypeCacheTotal,
+		orphanGCTotal,
+		serverAdoptTotal,
 	)
+}
+
+// Orphan garbage-collection results.
+const (
+	OrphanReaped           = "reaped"
+	OrphanError            = "error"
+	OrphanSkippedAmbiguous = "skipped_ambiguous_node"
+	OrphanSkippedReady     = "skipped_registered_ready"
+
+	// OrphanSweepFailed marks a sweep that could not run to completion. The sweep
+	// swallows list failures to protect its cadence, which also hides them from
+	// controller_runtime_reconcile_errors_total -- so without this a permanently
+	// broken sweep is indistinguishable from a cluster that simply has no orphans.
+	OrphanSweepFailed = "sweep_failed"
+)
+
+// RecordOrphanGC records one orphaned-server sweep outcome.
+func RecordOrphanGC(result string) {
+	orphanGCTotal.WithLabelValues(result).Inc()
+}
+
+// Adoption outcomes.
+const (
+	AdoptAdopted  = "adopted"
+	AdoptDeclined = "declined"
+	AdoptError    = "error"
+)
+
+// RecordServerAdopt records the outcome of one attempt to recover a server by
+// name after a create collided on it.
+func RecordServerAdopt(result string) {
+	serverAdoptTotal.WithLabelValues(result).Inc()
 }
 
 // RecordServerCreate records a server create result and its duration.

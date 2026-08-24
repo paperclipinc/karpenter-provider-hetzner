@@ -6,6 +6,8 @@ import (
 	// Register karpenter core types into the default k8s scheme.
 	_ "sigs.k8s.io/karpenter/pkg/apis/v1"
 
+	"github.com/awslabs/operatorpkg/controller"
+
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	"sigs.k8s.io/karpenter/pkg/controllers"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
@@ -15,6 +17,7 @@ import (
 	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
+	instancegc "github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/instance/garbagecollection"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"
 	hetznerop "github.com/paperclipinc/karpenter-provider-hetzner/pkg/operator"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
@@ -60,6 +63,25 @@ func main() {
 	// Our NodeClass status controller (network + image validation, Ready).
 	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, &hcloudClient.Firewall, &hcloudClient.SSHKey, imageProvider)
 
+	// Reap servers whose NodeClaim is gone. Karpenter core only garbage collects
+	// the opposite direction (NodeClaims with no instance), so without this an
+	// orphaned server runs and bills indefinitely.
+	providerControllers := []controller.Controller{nodeClassController}
+	if cfg.DisableInstanceGarbageCollection {
+		log.FromContext(ctx).Info("instance garbage collection is disabled; " +
+			"servers whose NodeClaim is gone will not be reclaimed")
+	} else {
+		// Log the enabled case too. DISABLE_INSTANCE_GARBAGE_COLLECTION leaves the
+		// sweep running on any value it does not recognise, so a line for one state
+		// only would let a typo'd pause ("disabled", "True!") look identical to a
+		// pause that took effect -- on the one flag whose job is protecting a fleet
+		// during maintenance that removes NodeClaims wholesale.
+		log.FromContext(ctx).Info("instance garbage collection is enabled; " +
+			"servers whose NodeClaim is gone will be reclaimed")
+		providerControllers = append(providerControllers,
+			instancegc.NewController(op.GetClient(), instanceProvider, cfg.ClusterName))
+	}
+
 	// Wire and start all controllers.
 	op.WithControllers(ctx, append(
 		controllers.NewControllers(
@@ -73,6 +95,6 @@ func main() {
 			clusterState,
 			op.InstanceTypeStore,
 		),
-		nodeClassController,
+		providerControllers...,
 	)...).Start(ctx)
 }

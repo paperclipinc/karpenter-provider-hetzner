@@ -40,6 +40,7 @@ version tag in production.
 │  • instancetype  — server types → priced InstanceTypes      │
 │  • imagefamily   — resolve Talos/Ubuntu images per arch     │
 │  • nodeclass ctrl— validate HCloudNodeClass, set Ready      │
+│  • instance GC   — reclaim servers with no NodeClaim        │
 └───────────────┬────────────────────────────────────────────┘
                 │ hcloud API
         ┌───────▼────────┐
@@ -48,6 +49,43 @@ version tag in production.
 ```
 
 A `NodePool` references an `HCloudNodeClass`. When pods are unschedulable, Karpenter asks this provider for instance types, picks the cheapest compatible offering, creates the server, and the node joins the cluster.
+
+### Reclaiming orphaned servers
+
+A server can outlive Karpenter's record of it. If the operator dies between the
+hcloud create call and writing the provider ID to the NodeClaim — a lost leader
+election, an evicted pod, an API-server timeout — the machine boots and runs with
+nothing pointing at it. Karpenter core does not reclaim it: its garbage collector
+deletes NodeClaims that have no server, never the reverse.
+
+Two mechanisms cover this:
+
+- **Adoption.** Hetzner rejects duplicate server names, so the next attempt for
+  the same NodeClaim collides. Rather than retrying into that collision forever,
+  the provider looks the server up and adopts it, provided it belongs to this
+  cluster and this NodeClaim and matches the requested type, location and image.
+- **Garbage collection.** A sweep every two minutes reclaims servers Karpenter
+  has no NodeClaim for, along with the Node objects they left behind. A server
+  must be seen reapable on three consecutive sweeps, and one whose node is
+  registered and still `Ready` is never touched — a machine carrying workloads is
+  core's to drain, not this sweep's to destroy. Sparing a server restarts its
+  count, so a machine the `Ready` guard protected does not sit on a spent grace
+  window waiting for its first NotReady blip.
+
+Set `instanceGarbageCollection.disabled: true` to pause the sweep during
+maintenance that removes NodeClaims wholesale (reinstalling the CRDs, restoring
+etcd, clearing finalizers by hand), so it does not act on a cluster that only
+looks empty. Provisioning and disruption keep working while it is off.
+
+Watch `karpenter_hetzner_orphaned_server_gc_total` and
+`karpenter_hetzner_server_adopt_total`, both labelled by `result`. Sustained
+`server_adopt_total{result="adopted"}` means creates are losing their results.
+Sustained `result="declined"` is worse: a NodeClaim keeps colliding with a server
+adoption refuses to take, so the machine bills with nothing able to claim it. On
+the sweep, a rising `orphaned_server_gc_total{result="error"}` means a server
+cannot be reclaimed and is still billing, and `result="sweep_failed"` means the
+sweep itself cannot run — it swallows list failures to protect its cadence, so
+this counter is the only place a permanently broken sweep shows up.
 
 ## Installation
 
@@ -176,7 +214,8 @@ comments explaining every field.
 | Env var | Required | Description |
 |---------|----------|-------------|
 | `HCLOUD_TOKEN` | yes | Hetzner Cloud API token |
-| `CLUSTER_NAME` | yes | Cluster identifier; scopes managed servers |
+| `CLUSTER_NAME` | yes | Cluster identifier; scopes managed servers. Must be unique per Hetzner project — two clusters sharing a value will reclaim each other's servers |
+| `DISABLE_INSTANCE_GARBAGE_COLLECTION` | no (unset) | Set to `true` to pause the orphaned-server sweep (chart value: `instanceGarbageCollection.disabled`) |
 | `METRICS_PORT` | no (8080) | Prometheus metrics port |
 | `HEALTH_PROBE_PORT` | no (8081) | Health/readiness probe port |
 

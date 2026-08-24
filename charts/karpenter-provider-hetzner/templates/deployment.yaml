@@ -68,6 +68,10 @@ spec:
                   key: {{ .Values.auth.secretRef.key }}
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
+            {{- if .Values.instanceGarbageCollection.disabled }}
+            - name: DISABLE_INSTANCE_GARBAGE_COLLECTION
+              value: "true"
+            {{- end }}
             - name: METRICS_PORT
               value: {{ .Values.metrics.port | quote }}
             - name: HEALTH_PROBE_PORT

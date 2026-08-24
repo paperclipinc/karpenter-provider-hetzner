@@ -52,6 +52,15 @@ args: []
 # Required: scopes managed servers so multiple clusters can share one Hetzner project.
 clusterName: ""
 
+# The operator reclaims servers Karpenter no longer has a NodeClaim for, which
+# would otherwise run and bill with nothing pointing at them. Set disabled: true
+# to pause that sweep during maintenance that removes NodeClaims wholesale —
+# reinstalling the CRDs, restoring etcd, clearing finalizers by hand — so it does
+# not act on a cluster that only looks empty. Provisioning and disruption keep
+# working while it is off. Remember to turn it back on.
+instanceGarbageCollection:
+  disabled: false
+
 metrics:
   port: 8080
 healthProbe:

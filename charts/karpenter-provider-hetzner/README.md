@@ -36,7 +36,8 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `clusterName` | `""` (required) | Scopes which servers the controller manages |
+| `clusterName` | `""` (required) | Scopes which servers the controller manages; must be unique per Hetzner project |
+| `instanceGarbageCollection.disabled` | `false` | Pause the sweep that reclaims servers with no NodeClaim (see values.yaml) |
 | `replicas` | `1` | Controller replicas |
 | `image.repository` | `ghcr.io/paperclipinc/karpenter-provider-hetzner` | Image |
 | `image.tag` | `""` | Empty tracks the chart appVersion; pin a tag in production |
@@ -86,4 +87,6 @@ When `serviceMonitor.enabled=true` the chart creates:
 - a `Service` named `karpenter-provider-hetzner-metrics` exposing port `http-metrics`
 - a `ServiceMonitor` that selects that Service and scrapes `/metrics` at the configured interval
 
-Requires the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) CRDs to be present. The controller exposes provider metrics under the `karpenter_hetzner_` prefix (server creates/deletes, durations, drift reasons, instance-type cache hits/misses, and raw hcloud API call counts).
+Requires the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) CRDs to be present. The controller exposes provider metrics under the `karpenter_hetzner_` prefix (server creates/deletes, durations, drift reasons, instance-type cache hits/misses, orphaned-server garbage-collection outcomes, adopted servers, and raw hcloud API call counts).
+
+Worth an alert: `karpenter_hetzner_orphaned_server_gc_total{result="error"}` means a server cannot be reclaimed and is still billing, and `karpenter_hetzner_server_adopt_total{result="declined"}` means a NodeClaim keeps colliding with a server adoption refuses to take.
