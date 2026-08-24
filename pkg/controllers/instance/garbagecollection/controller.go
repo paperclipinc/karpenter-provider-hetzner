@@ -60,6 +60,7 @@ type Controller struct {
 	kubeClient  client.Client
 	instances   InstanceProvider
 	clusterName string
+	clusterUID  string
 
 	// unownedSweeps counts, per provider ID, how many consecutive sweeps have
 	// seen the server without an owner. Entries vanish as soon as a server is
@@ -67,15 +68,54 @@ type Controller struct {
 	// the current fleet. Only Reconcile touches it, and the controller is a
 	// singleton, so it needs no lock.
 	unownedSweeps map[string]int
+
+	// reportedForeignUIDs remembers which colliding clusters have already been
+	// reported, so a shared CLUSTER_NAME is logged once rather than every sweep.
+	reportedForeignUIDs map[string]bool
 }
 
-func NewController(kubeClient client.Client, instances InstanceProvider, clusterName string) *Controller {
+func NewController(kubeClient client.Client, instances InstanceProvider, clusterName, clusterUID string) *Controller {
 	return &Controller{
-		kubeClient:    kubeClient,
-		instances:     instances,
-		clusterName:   clusterName,
-		unownedSweeps: map[string]int{},
+		kubeClient:          kubeClient,
+		instances:           instances,
+		clusterName:         clusterName,
+		clusterUID:          clusterUID,
+		unownedSweeps:       map[string]int{},
+		reportedForeignUIDs: map[string]bool{},
 	}
+}
+
+// managedByThisCluster reports whether this installation may act on a server.
+//
+// The cluster UID is the authoritative test. CLUSTER_NAME is operator-supplied
+// and nothing enforces uniqueness, so two clusters sharing one in a single
+// Hetzner project would each read the other's servers as unclaimed. A server
+// whose UID is present and different belongs to another cluster and is never
+// touched; a missing UID predates the label and is treated as ours, because
+// refusing those would strand every server created before this change.
+func (c *Controller) managedByThisCluster(ctx context.Context, s *hcloud.Server) bool {
+	if s.Labels[apiv1.ServerLabelManagedBy] != apiv1.ServerValueManagedBy {
+		return false
+	}
+	if s.Labels[apiv1.ServerLabelCluster] != c.clusterName {
+		return false
+	}
+	if uid := s.Labels[apiv1.ServerLabelClusterUID]; uid != "" && uid != c.clusterUID {
+		// Declining is the safe half; saying so is the useful half. Left silent, a
+		// name collision is indistinguishable from a cluster that simply has no
+		// orphans -- and the operator would never learn that two clusters are
+		// sharing a CLUSTER_NAME until something else went wrong. Report each
+		// colliding cluster once rather than every sweep, so it stays readable.
+		if !c.reportedForeignUIDs[uid] {
+			c.reportedForeignUIDs[uid] = true
+			logf.FromContext(ctx).Info(
+				"found servers labelled for this cluster's name but belonging to a different cluster; "+
+					"two clusters appear to share a CLUSTER_NAME in one Hetzner project",
+				"clusterName", c.clusterName, "ourClusterUID", c.clusterUID, "theirClusterUID", uid)
+		}
+		return false
+	}
+	return true
 }
 
 func (c *Controller) Name() string { return "instance.garbagecollection" }
@@ -153,8 +193,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 		// the provider's label selector, which this package cannot see and its
 		// tests do not exercise; a widened List would silently turn a per-cluster
 		// sweep into a project-wide deleter.
-		if s.Labels[apiv1.ServerLabelManagedBy] != apiv1.ServerValueManagedBy ||
-			s.Labels[apiv1.ServerLabelCluster] != c.clusterName {
+		if !c.managedByThisCluster(ctx, s) {
 			continue
 		}
 		if claimed.owns(s) {

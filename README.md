@@ -72,6 +72,15 @@ Two mechanisms cover this:
   count, so a machine the `Ready` guard protected does not sit on a spent grace
   window waiting for its first NotReady blip.
 
+**`clusterName` must be unique per cluster within a Hetzner project.** Servers
+are labelled with it, and the sweep uses that label to decide what it owns. Two
+clusters sharing a name in one project would each see the other's servers as
+unclaimed. The operator therefore also stamps the UID of the cluster's
+`kube-system` namespace on every server it creates and refuses to touch a server
+carrying a different one, logging the collision once. That protects servers
+created from this version onward; servers predating it carry no UID and are
+still matched on name alone, so distinct names remain the thing to get right.
+
 Set `instanceGarbageCollection.disabled: true` to pause the sweep during
 maintenance that removes NodeClaims wholesale (reinstalling the CRDs, restoring
 etcd, clearing finalizers by hand), so it does not act on a cluster that only

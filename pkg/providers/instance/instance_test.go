@@ -513,6 +513,76 @@ func uniquenessErr() error {
 	return hcloud.Error{Code: hcloud.ErrorCodeUniquenessError, Message: "server name is already used"}
 }
 
+const testClusterUID = "34f25cbf-c7b5-49d1-833b-103bff8a34ad"
+
+// providerWithUID is the production shape: a cluster name plus the UID that
+// makes ownership unambiguous when two clusters share a name.
+func providerWithUID(client ServerClient) *Provider {
+	p := NewProvider(client, "test-cluster")
+	p.clusterUID = testClusterUID
+	return p
+}
+
+// Every server this installation creates must carry the cluster UID, or a
+// same-named cluster sharing the Hetzner project cannot tell them apart.
+func TestCreate_StampsClusterUID(t *testing.T) {
+	client := newMockServerClient()
+
+	server, err := providerWithUID(client).Create(context.Background(), adoptOpts())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := server.Labels[apiv1.ServerLabelClusterUID]; got != testClusterUID {
+		t.Errorf("cluster UID label = %q, want %q", got, testClusterUID)
+	}
+}
+
+// Adoption hands a live machine to Karpenter, which will eventually terminate
+// it. Taking one belonging to a same-named cluster would destroy their node.
+func TestCreate_UniquenessErrorRefusesForeignClusterUID(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Labels[apiv1.ServerLabelClusterUID] = "6e5f8dfb-e54b-41ee-8fb3-89a48a42231f"
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	if _, err := providerWithUID(client).Create(context.Background(), adoptOpts()); err == nil {
+		t.Fatal("adopted a server belonging to a same-named other cluster")
+	}
+}
+
+func TestCreate_AdoptsServerWithMatchingClusterUID(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Labels[apiv1.ServerLabelClusterUID] = testClusterUID
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	server, err := providerWithUID(client).Create(context.Background(), adoptOpts())
+	if err != nil {
+		t.Fatalf("refused to adopt our own server: %v", err)
+	}
+	if server == nil || server.ID != 42 {
+		t.Fatalf("expected server 42, got %+v", server)
+	}
+}
+
+// Servers created before this label existed carry no UID; refusing them would
+// make every pre-existing orphan unrecoverable.
+func TestCreate_AdoptsLegacyServerWithoutClusterUID(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[42] = ownedOrphan(42) // no UID label
+	client.createErr = uniquenessErr()
+
+	server, err := providerWithUID(client).Create(context.Background(), adoptOpts())
+	if err != nil {
+		t.Fatalf("refused to adopt a legacy server: %v", err)
+	}
+	if server == nil || server.ID != 42 {
+		t.Fatalf("expected server 42, got %+v", server)
+	}
+}
+
 // A crash between the Hetzner create call and persisting the provider ID leaves
 // a running server that Karpenter has no record of. Every retry then collides on
 // the name. Adopting the existing server is the only way to recover it, since
@@ -700,7 +770,7 @@ func (m *mockPlacementGroupClient) Create(_ context.Context, opts hcloud.Placeme
 func TestCreate_SpreadStrategy_CreatesPG(t *testing.T) {
 	sc := newMockServerClient()
 	pgc := newMockPlacementGroupClient()
-	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", testClusterUID, nil)
 
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name:                   "n",
@@ -734,7 +804,7 @@ func TestCreate_SpreadStrategy_CreatesPG(t *testing.T) {
 func TestCreate_SpreadStrategy_EmptyStrategy_CreatesPG(t *testing.T) {
 	sc := newMockServerClient()
 	pgc := newMockPlacementGroupClient()
-	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", testClusterUID, nil)
 
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name:       "n",
@@ -757,7 +827,7 @@ func TestCreate_SpreadStrategy_EmptyStrategy_CreatesPG(t *testing.T) {
 func TestCreate_NoneStrategy_NoPG(t *testing.T) {
 	sc := newMockServerClient()
 	pgc := newMockPlacementGroupClient()
-	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", testClusterUID, nil)
 
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name:                   "n",
@@ -788,7 +858,7 @@ func TestCreate_SpreadStrategy_ReusesPG(t *testing.T) {
 	pgc.groups = []*hcloud.PlacementGroup{
 		{ID: existingID, Name: "karpenter-test-cluster-my-pool", Type: hcloud.PlacementGroupTypeSpread},
 	}
-	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", testClusterUID, nil)
 
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name:                   "n",
@@ -816,7 +886,7 @@ func TestCreate_SpreadStrategy_ReusesPG(t *testing.T) {
 func TestCreate_SpreadStrategy_EmptyNodePool(t *testing.T) {
 	sc := newMockServerClient()
 	pgc := newMockPlacementGroupClient()
-	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", nil)
+	p := NewProviderWithPlacementGroups(sc, pgc, "test-cluster", testClusterUID, nil)
 
 	_, err := p.Create(context.Background(), CreateOpts{
 		Name:                   "n",

@@ -41,7 +41,10 @@ func (f *fakeInstanceProvider) Delete(_ context.Context, providerID string) erro
 	return nil
 }
 
-const testCluster = "test-cluster"
+const (
+	testCluster    = "test-cluster"
+	testClusterUID = "34f25cbf-c7b5-49d1-833b-103bff8a34ad"
+)
 
 // server is a server this installation created: it carries the ownership labels
 // the sweep re-checks before touching anything. It deliberately sets no Created
@@ -58,7 +61,7 @@ func server(id int64, name string) *hcloud.Server {
 }
 
 func newTestController(kubeClient client.Client, instances InstanceProvider) *Controller {
-	return NewController(kubeClient, instances, testCluster)
+	return NewController(kubeClient, instances, testCluster, testClusterUID)
 }
 
 // sweep runs one reconcile and fails the test on error.
@@ -234,6 +237,72 @@ func TestReconcile_IgnoresServerFromAnotherCluster(t *testing.T) {
 
 	if len(instances.deleted) != 0 {
 		t.Errorf("deleted another cluster's server: %v", instances.deleted)
+	}
+}
+
+// CLUSTER_NAME is operator-supplied with no uniqueness guarantee. Two clusters
+// sharing one in a single Hetzner project would otherwise each see the other's
+// servers as unclaimed and delete them. The cluster UID settles it.
+func TestReconcile_IgnoresServerOfAnotherClusterWithTheSameName(t *testing.T) {
+	foreign := server(42, "worker-abc")
+	foreign.Labels[apiv1.ServerLabelClusterUID] = "6e5f8dfb-e54b-41ee-8fb3-89a48a42231f"
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{foreign}}
+
+	c := newTestController(newFakeClient(), instances)
+	sweepPastGrace(t, c)
+
+	if len(instances.deleted) != 0 {
+		t.Errorf("deleted a same-named other cluster's server: %v", instances.deleted)
+	}
+}
+
+// Silently declining to touch the other cluster's servers is safe but useless:
+// a name collision would look exactly like a cluster with no orphans. Say so --
+// once per colliding cluster, not once per sweep, or it becomes log noise that
+// nobody reads.
+func TestReconcile_RecordsAForeignClusterSharingOurNameOnce(t *testing.T) {
+	const foreignUID = "6e5f8dfb-e54b-41ee-8fb3-89a48a42231f"
+	foreign := server(42, "worker-abc")
+	foreign.Labels[apiv1.ServerLabelClusterUID] = foreignUID
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{foreign}}
+
+	c := newTestController(newFakeClient(), instances)
+	for range 4 {
+		sweep(t, c)
+	}
+
+	if !c.reportedForeignUIDs[foreignUID] {
+		t.Error("did not record the colliding cluster")
+	}
+	if len(c.reportedForeignUIDs) != 1 {
+		t.Errorf("expected exactly one recorded collision, got %d", len(c.reportedForeignUIDs))
+	}
+}
+
+// A server carrying our own UID is ours, name collision or not.
+func TestReconcile_ReapsServerWithMatchingClusterUID(t *testing.T) {
+	own := server(42, "worker-abc")
+	own.Labels[apiv1.ServerLabelClusterUID] = testClusterUID
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{own}}
+
+	c := newTestController(newFakeClient(), instances)
+	sweepPastGrace(t, c)
+
+	if len(instances.deleted) != 1 {
+		t.Errorf("failed to reap our own orphan: %v", instances.deleted)
+	}
+}
+
+// Servers created before this label existed carry no UID. Treating them as
+// foreign would strand every pre-existing orphan permanently.
+func TestReconcile_ReapsLegacyServerWithoutClusterUID(t *testing.T) {
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{server(42, "worker-abc")}}
+
+	c := newTestController(newFakeClient(), instances)
+	sweepPastGrace(t, c)
+
+	if len(instances.deleted) != 1 {
+		t.Errorf("failed to reap a legacy orphan with no cluster UID: %v", instances.deleted)
 	}
 }
 

@@ -40,6 +40,12 @@ type Provider struct {
 	pgClient    PlacementGroupClient
 	waiter      ActionWaiter
 	clusterName string
+
+	// clusterUID identifies this cluster independently of its operator-chosen
+	// name, so two clusters sharing a CLUSTER_NAME in one Hetzner project can
+	// still tell their servers apart. Empty disables the check, which is the
+	// pre-existing behaviour.
+	clusterUID string
 }
 
 // NewProvider returns a Provider that does NOT wait for hcloud actions to
@@ -59,8 +65,11 @@ func NewProviderWithWaiter(client ServerClient, clusterName string, waiter Actio
 // NewProviderWithPlacementGroups returns a Provider that supports placement
 // groups and waits for hcloud create actions to complete. This is the
 // production constructor.
-func NewProviderWithPlacementGroups(client ServerClient, pgClient PlacementGroupClient, clusterName string, waiter ActionWaiter) *Provider {
-	return &Provider{client: client, pgClient: pgClient, waiter: waiter, clusterName: clusterName}
+func NewProviderWithPlacementGroups(client ServerClient, pgClient PlacementGroupClient, clusterName, clusterUID string, waiter ActionWaiter) *Provider {
+	return &Provider{
+		client: client, pgClient: pgClient, waiter: waiter,
+		clusterName: clusterName, clusterUID: clusterUID,
+	}
 }
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
@@ -141,6 +150,9 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 	}
 	labels[apiv1.ServerLabelManagedBy] = apiv1.ServerValueManagedBy
 	labels[apiv1.ServerLabelCluster] = p.clusterName
+	if p.clusterUID != "" {
+		labels[apiv1.ServerLabelClusterUID] = p.clusterUID
+	}
 	if opts.NodeClaim != "" {
 		labels[apiv1.ServerLabelNodeClaim] = opts.NodeClaim
 	}
@@ -320,6 +332,14 @@ func (p *Provider) adoptOrphan(ctx context.Context, opts CreateOpts, createErr e
 			continue
 		}
 		if s.Labels[apiv1.ServerLabelCluster] != p.clusterName {
+			continue
+		}
+		// The name label alone is not proof of ownership: CLUSTER_NAME is
+		// operator-supplied and not unique. Adoption hands a live machine to
+		// Karpenter, which will eventually terminate it, so taking one belonging
+		// to a same-named cluster would destroy their node. A missing UID predates
+		// the label and is treated as ours.
+		if uid := s.Labels[apiv1.ServerLabelClusterUID]; uid != "" && uid != p.clusterUID {
 			continue
 		}
 		// Only a server this same NodeClaim created is evidence of a lost create.

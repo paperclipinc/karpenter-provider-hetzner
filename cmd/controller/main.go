@@ -42,7 +42,19 @@ func main() {
 	}
 
 	// Create the three providers.
-	instanceProvider := instance.NewProviderWithPlacementGroups(&hcloudClient.Server, &hcloudClient.PlacementGroup, cfg.ClusterName, &hcloudClient.Action)
+	// Identify this cluster independently of its operator-chosen name. CLUSTER_NAME
+	// is not guaranteed unique, and two clusters sharing one in a single Hetzner
+	// project would otherwise each treat the other's servers as its own -- which
+	// now means deleting them. The kube-system UID is unique per cluster and
+	// stable for its lifetime. Read through the API reader because the manager's
+	// cache is not running yet.
+	clusterUID, err := hetznerop.ClusterUID(ctx, op.GetAPIReader())
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to read the cluster UID")
+		return
+	}
+
+	instanceProvider := instance.NewProviderWithPlacementGroups(&hcloudClient.Server, &hcloudClient.PlacementGroup, cfg.ClusterName, clusterUID, &hcloudClient.Action)
 	typeProvider := instancetype.NewProvider(&hcloudClient.ServerType)
 	imageProvider := imagefamily.NewProvider(&hcloudClient.Image)
 
@@ -79,7 +91,7 @@ func main() {
 		log.FromContext(ctx).Info("instance garbage collection is enabled; " +
 			"servers whose NodeClaim is gone will be reclaimed")
 		providerControllers = append(providerControllers,
-			instancegc.NewController(op.GetClient(), instanceProvider, cfg.ClusterName))
+			instancegc.NewController(op.GetClient(), instanceProvider, cfg.ClusterName, clusterUID))
 	}
 
 	// Wire and start all controllers.
