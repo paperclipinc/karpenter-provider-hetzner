@@ -29,10 +29,12 @@ type mockServerClient struct {
 	nextID           int64
 	deleted          []int64
 	lastListSelector string
+	lastListName     string
 	action           *hcloud.Action
 	nextActions      []*hcloud.Action
 	createErr        error
 	deleteErr        error
+	listErr          error
 	lastOpts         hcloud.ServerCreateOpts
 }
 
@@ -64,7 +66,12 @@ func (m *mockServerClient) DeleteWithResult(_ context.Context, server *hcloud.Se
 	return &hcloud.ServerDeleteResult{}, nil, nil
 }
 
-func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server, *hcloud.Response, error) {
+func (m *mockServerClient) GetByID(ctx context.Context, id int64) (*hcloud.Server, *hcloud.Response, error) {
+	// A real client fails immediately on a done context; honouring that here is
+	// what lets a test tell a live cleanup path from a dead one.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	server, ok := m.servers[id]
 	if !ok {
 		return nil, nil, nil
@@ -74,8 +81,15 @@ func (m *mockServerClient) GetByID(_ context.Context, id int64) (*hcloud.Server,
 
 func (m *mockServerClient) AllWithOpts(_ context.Context, opts hcloud.ServerListOpts) ([]*hcloud.Server, error) {
 	m.lastListSelector = opts.LabelSelector
+	m.lastListName = opts.Name
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	result := make([]*hcloud.Server, 0, len(m.servers))
 	for _, s := range m.servers {
+		if opts.Name != "" && s.Name != opts.Name {
+			continue
+		}
 		result = append(result, s)
 	}
 	return result, nil
@@ -335,6 +349,278 @@ func TestCreate_MapsCapacityError(t *testing.T) {
 	_, err := p.Create(context.Background(), CreateOpts{Name: "n", ServerType: "cx22", Location: "nbg1", Image: &hcloud.Image{ID: 1}})
 	if !karpcp.IsInsufficientCapacityError(err) {
 		t.Errorf("expected InsufficientCapacityError, got %v", err)
+	}
+}
+
+// orphan builds a server that a previous Create attempt left behind, labelled
+// as this provider labels its own servers and shaped like the request in
+// adoptOpts below.
+func orphan(id int64, name, cluster string) *hcloud.Server {
+	return &hcloud.Server{
+		ID:         id,
+		Name:       name,
+		ServerType: &hcloud.ServerType{Name: "cx22"},
+		Location:   &hcloud.Location{Name: "nbg1"},
+		Labels: map[string]string{
+			apiv1.ServerLabelManagedBy: apiv1.ServerValueManagedBy,
+			apiv1.ServerLabelCluster:   cluster,
+		},
+	}
+}
+
+// adoptOpts is the request every adoption test replays.
+func adoptOpts() CreateOpts {
+	return CreateOpts{
+		Name: "worker-abc", ServerType: "cx22", Location: "nbg1",
+		Image: &hcloud.Image{ID: 1}, NodeClaim: "worker-abc",
+	}
+}
+
+// ownedOrphan is a server a previous attempt created for THIS NodeClaim, with
+// the image the request resolves to.
+func ownedOrphan(id int64) *hcloud.Server {
+	s := orphan(id, "worker-abc", "test-cluster")
+	s.Labels[apiv1.ServerLabelNodeClaim] = "worker-abc"
+	s.Image = &hcloud.Image{ID: 1}
+	s.Status = hcloud.ServerStatusRunning
+	return s
+}
+
+// A server left by a different NodeClaim tells us nothing about whether it was
+// built from this request's inputs -- userData, SSH keys, networks, firewalls and
+// public-IP policy are all invisible on the returned server and none of them are
+// drift-checked, so a name match alone is not evidence of a match.
+func TestCreate_UniquenessErrorRefusesServerOfAnotherNodeClaim(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Labels[apiv1.ServerLabelNodeClaim] = "some-other-claim"
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	_, err := NewProvider(client, "test-cluster").Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "adopted a server built for a different NodeClaim")
+}
+
+// Only a server that is running or still coming up is a plausible launch. An
+// "off" machine adopted as a success gives Karpenter a NodeClaim with capacity
+// that nothing will ever start.
+func TestCreate_UniquenessErrorRefusesNonRunningServer(t *testing.T) {
+	for _, status := range []hcloud.ServerStatus{
+		hcloud.ServerStatusOff, hcloud.ServerStatusDeleting,
+		hcloud.ServerStatusStopping, hcloud.ServerStatusUnknown,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			client := newMockServerClient()
+			s := ownedOrphan(42)
+			s.Status = status
+			client.servers[42] = s
+			client.createErr = uniquenessErr()
+
+			_, err := NewProvider(client, "test-cluster").Create(context.Background(), adoptOpts())
+			assertRefusedAdoption(t, err, fmt.Sprintf("adopted a server in %q status", status))
+		})
+	}
+}
+
+// An unresolved location must fail closed. Karpenter derives the NodeClaim's
+// zone label from the offering it picked, so adopting a machine in an unknown
+// location silently breaks hcloud CSI volume scheduling.
+func TestCreate_UniquenessErrorRefusesWhenLocationUnresolved(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[42] = ownedOrphan(42)
+	client.createErr = uniquenessErr()
+
+	opts := adoptOpts()
+	opts.Location = ""
+	_, err := NewProvider(client, "test-cluster").Create(context.Background(), opts)
+	assertRefusedAdoption(t, err, "adopted a server for a request with no resolved location")
+}
+
+// Karpenter records the adopted server's image as the NodeClaim's, and image
+// drift compares those two -- so an image mismatch adopted here can never be
+// detected afterwards.
+func TestCreate_UniquenessErrorRefusesImageMismatch(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Image = &hcloud.Image{ID: 999}
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	_, err := NewProvider(client, "test-cluster").Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "adopted a server running a different image")
+}
+
+// The create call succeeded, so the server exists; if waiting on its actions
+// fails we must not walk away and leave it running. Deleting it here is what
+// keeps adoption's input limited to crash-orphans, whose machines are healthy.
+func TestCreate_WaiterFailureDeletesTheCreatedServer(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{err: fmt.Errorf("action failed")}
+
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	if _, err := p.Create(context.Background(), adoptOpts()); err == nil {
+		t.Fatal("expected the wait failure to surface")
+	}
+	if len(client.deleted) != 1 {
+		t.Errorf("left the created server running after its actions failed: deleted=%v", client.deleted)
+	}
+}
+
+// hcloud's WaitFor returns ctx.Err() when the caller's context is cancelled -- a
+// SIGTERM, a lost leader lease, a reconcile deadline -- which is the likeliest
+// way to reach the cleanup at all. Running the cleanup on that same context would
+// fail it before it issued a single request, leaking the server it exists to
+// reclaim and leaving a half-provisioned machine for a later retry to adopt.
+func TestCreate_WaiterFailureDeletesTheServerOnACancelledContext(t *testing.T) {
+	client := newMockServerClient()
+	client.action = &hcloud.Action{ID: 1}
+	waiter := &mockActionWaiter{err: context.Canceled}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p := NewProviderWithWaiter(client, "test-cluster", waiter)
+	if _, err := p.Create(ctx, adoptOpts()); err == nil {
+		t.Fatal("expected the wait failure to surface")
+	}
+	if len(client.deleted) != 1 {
+		t.Errorf("left the created server running after a cancelled create: deleted=%v", client.deleted)
+	}
+}
+
+// assertRefusedAdoption asserts that Create declined to adopt AND that the
+// original uniqueness error reached the caller unchanged. The contract is not
+// "some error came back" but "a name collision stays an ordinary, retryable
+// collision": mapping it to InsufficientCapacityError would make
+// cloudprovider.Create call MarkUnavailable and blacklist a perfectly healthy
+// server type/location offering on every collision, pushing the NodePool onto
+// more expensive types.
+func assertRefusedAdoption(t *testing.T, err error, why string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal(why)
+	}
+	if !hcloud.IsError(err, hcloud.ErrorCodeUniquenessError) {
+		t.Errorf("expected the original uniqueness error to reach the caller, got %v", err)
+	}
+	if karpcp.IsInsufficientCapacityError(err) {
+		t.Error("a name collision was mapped to InsufficientCapacityError, blacklisting a healthy offering")
+	}
+}
+
+func uniquenessErr() error {
+	return hcloud.Error{Code: hcloud.ErrorCodeUniquenessError, Message: "server name is already used"}
+}
+
+// A crash between the Hetzner create call and persisting the provider ID leaves
+// a running server that Karpenter has no record of. Every retry then collides on
+// the name. Adopting the existing server is the only way to recover it, since
+// the server's own name and labels are the sole surviving record.
+func TestCreate_AdoptsOrphanedServerOnUniquenessError(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[42] = ownedOrphan(42)
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	server, err := p.Create(context.Background(), adoptOpts())
+	if err != nil {
+		t.Fatalf("expected adoption to succeed, got error: %v", err)
+	}
+	if server == nil || server.ID != 42 {
+		t.Fatalf("expected adopted server 42, got %+v", server)
+	}
+	if client.lastListName != "worker-abc" {
+		t.Errorf("expected lookup by name %q, got %q", "worker-abc", client.lastListName)
+	}
+}
+
+func TestCreate_UniquenessErrorRefusesForeignCluster(t *testing.T) {
+	client := newMockServerClient()
+	foreign := ownedOrphan(42)
+	foreign.Labels[apiv1.ServerLabelCluster] = "someone-elses-cluster"
+	client.servers[42] = foreign
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected error, adopted a server belonging to another cluster")
+}
+
+func TestCreate_UniquenessErrorRefusesUnmanagedServer(t *testing.T) {
+	client := newMockServerClient()
+	client.servers[42] = &hcloud.Server{ID: 42, Name: "worker-abc"} // no karpenter labels
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected error, adopted a server this provider does not manage")
+}
+
+// The caller builds the NodeClaim's capacity and zone labels from the offering
+// it selected on THIS attempt, not from the server Create hands back. Adopting a
+// server of a different shape would therefore advertise capacity the machine
+// does not have, and a zone it is not in — which silently breaks volume
+// scheduling. Declining leaves the orphan for the garbage collector.
+func TestCreate_UniquenessErrorRefusesMismatchedServerType(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.ServerType = &hcloud.ServerType{Name: "cx42"}
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected error, adopted a server of a different server type")
+}
+
+func TestCreate_UniquenessErrorRefusesMismatchedLocation(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Location = &hcloud.Location{Name: "fsn1"}
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected error, adopted a server in a different location")
+}
+
+// Hetzner deletes asynchronously and keeps the name reserved until it finishes,
+// so the garbage collector reaping an orphan leaves a window where a retry
+// collides with the dying server. Adopting it would bind the NodeClaim to a
+// machine that vanishes seconds later, stalling until the registration timeout.
+func TestCreate_UniquenessErrorRefusesDeletingServer(t *testing.T) {
+	client := newMockServerClient()
+	s := ownedOrphan(42)
+	s.Status = hcloud.ServerStatusDeleting
+	client.servers[42] = s
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected error, adopted a server Hetzner is deleting")
+}
+
+func TestCreate_UniquenessErrorWithNoMatchReturnsError(t *testing.T) {
+	client := newMockServerClient()
+	client.createErr = uniquenessErr()
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected the original uniqueness error when no server matches")
+}
+
+func TestCreate_UniquenessErrorLookupFailureReturnsCreateError(t *testing.T) {
+	client := newMockServerClient()
+	client.createErr = uniquenessErr()
+	client.listErr = fmt.Errorf("api unavailable")
+
+	p := NewProvider(client, "test-cluster")
+	_, err := p.Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "expected an error when the adoption lookup fails")
+	if !strings.Contains(err.Error(), "already used") {
+		t.Errorf("expected the original create error to survive, got %v", err)
 	}
 }
 
