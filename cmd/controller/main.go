@@ -40,7 +40,7 @@ func main() {
 
 	// Create the three providers.
 	instanceProvider := instance.NewProviderWithPlacementGroups(&hcloudClient.Server, &hcloudClient.PlacementGroup, cfg.ClusterName, &hcloudClient.Action)
-	typeProvider := instancetype.NewProvider(&hcloudClient.ServerType)
+	typeProvider := instancetype.NewProvider(&hcloudClient.ServerType, cfg.VMMemoryOverheadPercent)
 	imageProvider := imagefamily.NewProvider(&hcloudClient.Image)
 
 	// Create the cloud provider.

@@ -94,7 +94,7 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	}
 
 	// Get instance types for the node class locations.
-	instanceTypes, err := cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
+	instanceTypes, err := cp.typeProvider.List(ctx, nodeClass)
 	if err != nil {
 		return nil, fmt.Errorf("listing instance types: %w", err)
 	}
@@ -251,7 +251,7 @@ func (cp *CloudProvider) GetInstanceTypes(ctx context.Context, nodePool *karpv1.
 		return nil, fmt.Errorf("resolving node class for node pool %s: %w", nodePool.Name, err)
 	}
 
-	return cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
+	return cp.typeProvider.List(ctx, nodeClass)
 }
 
 // IsDrifted determines whether the given NodeClaim has drifted from its desired state.

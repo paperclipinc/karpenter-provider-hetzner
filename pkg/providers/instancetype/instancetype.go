@@ -29,34 +29,53 @@ type ServerTypeClient interface {
 type Provider struct {
 	client ServerTypeClient
 
+	// vmMemoryOverheadPercent estimates the gap between a server type's
+	// advertised memory and what the guest sees, for types no node has yet
+	// reported. Once one has, discovered holds the measured value instead.
+	vmMemoryOverheadPercent float64
+
 	mu          sync.RWMutex
 	cachedTypes []*cloudprovider.InstanceType
 	cacheExpiry time.Time
 
 	unavailable *unavailableCache
+	discovered  *discoveredCapacityCache
 }
 
 // NewProvider creates a new instance type provider.
-func NewProvider(client ServerTypeClient) *Provider {
+func NewProvider(client ServerTypeClient, vmMemoryOverheadPercent float64) *Provider {
 	return &Provider{
-		client: client,
+		client:                  client,
+		vmMemoryOverheadPercent: vmMemoryOverheadPercent,
 		unavailable: newUnavailableCache(
 			// 5m: long enough to route around a saturated location, short enough to
 			// retry it soon. TODO: make configurable via operator config if needed.
 			5 * time.Minute,
 		),
+		discovered: newDiscoveredCapacityCache(),
 	}
 }
 
-// List returns all available InstanceTypes, filtered to those with offerings in the given locations.
-// Results are cached for 6 hours.
-func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovider.InstanceType, error) {
+// List returns all available InstanceTypes for a node class, filtered to those
+// with offerings in its locations. A nil node class lists every type with no
+// location filter and no declared kubelet reservations.
+//
+// The 6h cache holds only what depends on the hcloud catalogue. Anything that
+// depends on the node class -- its kubelet reservations, and the capacity
+// measured for its image -- is applied per call, so a node class edit takes
+// effect immediately instead of at the next catalogue refresh.
+func (p *Provider) List(ctx context.Context, nodeClass *apiv1.HCloudNodeClass) ([]*cloudprovider.InstanceType, error) {
+	var locations []string
+	if nodeClass != nil {
+		locations = nodeClass.Spec.Locations
+	}
+
 	p.mu.RLock()
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
 		cached := p.cachedTypes
 		p.mu.RUnlock()
 		metrics.RecordCacheHit()
-		return p.applyAvailability(filterByLocations(cached, locations)), nil
+		return p.resolve(filterByLocations(cached, locations), nodeClass), nil
 	}
 	p.mu.RUnlock()
 
@@ -66,7 +85,7 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 	// Double-check after acquiring write lock.
 	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
 		metrics.RecordCacheHit()
-		return p.applyAvailability(filterByLocations(p.cachedTypes, locations)), nil
+		return p.resolve(filterByLocations(p.cachedTypes, locations), nodeClass), nil
 	}
 
 	// Cache miss: fetch fresh data from the hcloud API.
@@ -79,13 +98,13 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 
 	types := make([]*cloudprovider.InstanceType, 0, len(serverTypes))
 	for _, st := range serverTypes {
-		types = append(types, toInstanceType(st))
+		types = append(types, toInstanceType(st, p.vmMemoryOverheadPercent))
 	}
 
 	p.cachedTypes = types
 	p.cacheExpiry = time.Now().Add(cacheTTL)
 
-	return p.applyAvailability(filterByLocations(types, locations)), nil
+	return p.resolve(filterByLocations(types, locations), nodeClass), nil
 }
 
 // MarkUnavailable records that a (serverType, location) offering failed with a
@@ -96,17 +115,20 @@ func (p *Provider) MarkUnavailable(serverType, location string) {
 	p.unavailable.markUnavailable(serverType, location)
 }
 
-// applyAvailability returns copies of the given instance types with each
-// offering's Available flag computed live from the unavailable cache, so the
-// 6h type-catalog cache never bakes in (and thus never staleness-traps)
-// availability.
+// resolve returns copies of the given instance types with everything that must
+// not be baked into the 6h catalogue cache applied fresh:
 //
-// The returned InstanceType and Offering structs are fresh value-copies, so
-// setting Available never mutates the cached entries. Note that nested
-// reference fields (Requirements, Capacity, Overhead) are intentionally shared
-// with the cache, not deep-copied: callers must treat returned types as
-// read-only and must not mutate those maps.
-func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
+//   - each offering's Available flag, from the unavailable cache, so the
+//     catalogue never staleness-traps availability;
+//   - memory capacity measured from a registered node of that type and image,
+//     when one has been seen, in place of the estimate;
+//   - the overhead implied by this node class's declared kubelet reservations.
+//
+// The returned InstanceType and Offering structs are fresh value-copies, and
+// Capacity is rebuilt rather than shared because the discovered value differs
+// per node class. Requirements stays shared read-only with the cached entry, so
+// callers must not mutate it.
+func (p *Provider) resolve(types []*cloudprovider.InstanceType, nodeClass *apiv1.HCloudNodeClass) []*cloudprovider.InstanceType {
 	out := make([]*cloudprovider.InstanceType, len(types))
 	for i, it := range types {
 		offerings := make(cloudprovider.Offerings, len(it.Offerings))
@@ -116,22 +138,33 @@ func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*clo
 			cp.Available = !p.unavailable.isUnavailable(it.Name, zone)
 			offerings[j] = &cp
 		}
+
+		capacity := make(corev1.ResourceList, len(it.Capacity))
+		for k, v := range it.Capacity {
+			capacity[k] = v
+		}
+		if measured, ok := p.discovered.get(it.Name, nodeClass); ok {
+			capacity[corev1.ResourceMemory] = measured
+		}
+
 		// Construct a fresh InstanceType (rather than copying *it) to avoid
-		// copying the embedded sync.Once (govet copylocks); Requirements/Capacity/
-		// Overhead are intentionally shared read-only with the cached entry.
+		// copying the embedded sync.Once (govet copylocks), which also matters
+		// because Allocatable() memoises on first call.
 		out[i] = &cloudprovider.InstanceType{
 			Name:         it.Name,
 			Offerings:    offerings,
 			Requirements: it.Requirements,
-			Capacity:     it.Capacity,
-			Overhead:     it.Overhead,
+			Capacity:     capacity,
+			Overhead:     overheadFor(nodeClass, capacity),
 		}
 	}
 	return out
 }
 
-// toInstanceType maps a Hetzner ServerType to a Karpenter InstanceType.
-func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
+// toInstanceType maps a Hetzner ServerType to a Karpenter InstanceType. Only
+// node-class-independent facts belong here, since the result is cached across
+// every node class; Overhead is left nil and filled in by resolve.
+func toInstanceType(st *hcloud.ServerType, vmMemoryOverheadPercent float64) *cloudprovider.InstanceType {
 	arch := "amd64"
 	if st.Architecture == hcloud.ArchitectureARM {
 		arch = "arm64"
@@ -156,8 +189,10 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 		})
 	}
 
-	// Memory: ServerType.Memory is float32 in GB.
-	memBytes := int64(float64(st.Memory) * 1024 * 1024 * 1024)
+	// Memory: ServerType.Memory is float32 in GB. Hetzner's figure is what the
+	// VM is allocated, not what the guest kernel ends up seeing, so hold back an
+	// estimate of the difference until a real node tells us the true number.
+	memBytes := memoryWithVMOverhead(int64(float64(st.Memory)*1024*1024*1024), vmMemoryOverheadPercent)
 	// Disk: ServerType.Disk is int in GB.
 	diskBytes := int64(st.Disk) * 1024 * 1024 * 1024
 
@@ -176,12 +211,6 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 			corev1.ResourceMemory:           *resource.NewQuantity(memBytes, resource.BinarySI),
 			corev1.ResourceEphemeralStorage: *resource.NewQuantity(diskBytes, resource.BinarySI),
 			corev1.ResourcePods:             *resource.NewQuantity(110, resource.DecimalSI),
-		},
-		Overhead: &cloudprovider.InstanceTypeOverhead{
-			KubeReserved: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("100Mi"),
-			},
 		},
 	}
 }
