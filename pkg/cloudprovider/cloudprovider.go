@@ -210,9 +210,78 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	return created, nil
 }
 
+// VolumeDetachmentTimeout bounds how long Delete will hold off destroying a
+// server that still has volumes attached.
+//
+// Deleting a server force-detaches whatever is attached to it, so an unbounded
+// wait would turn a stuck detach into a node that can never terminate -- strictly
+// worse than the unclean detach it is trying to avoid. Past this point we delete
+// anyway, which is exactly the behaviour that existed before this check, so the
+// worst case is today's behaviour rather than a wedged node.
+//
+// Karpenter core has already waited for the Kubernetes VolumeAttachment to be
+// removed by the time Delete is called, so the remaining hcloud-side detach
+// should be seconds. Five minutes is generous for that, and short enough not to
+// meaningfully delay a rolling consolidation.
+const VolumeDetachmentTimeout = 5 * time.Minute
+
 // Delete terminates the server backing the given NodeClaim.
+//
+// A server whose volumes are still attached is left alone and nil is returned:
+// in core's termination contract a nil error means "still terminating", and core
+// requeues after 5s. Only a NodeClaimNotFoundError ends that loop.
 func (cp *CloudProvider) Delete(ctx context.Context, nodeClaim *karpv1.NodeClaim) error {
+	if cp.awaitingVolumeDetachment(ctx, nodeClaim) {
+		return nil
+	}
 	return cp.instanceProvider.Delete(ctx, nodeClaim.Status.ProviderID)
+}
+
+// awaitingVolumeDetachment reports whether the server still has volumes attached
+// and is still within the detachment grace.
+//
+// Karpenter core waits for the Kubernetes VolumeAttachment object to disappear
+// before it calls Delete, but that object is removed by the attach-detach
+// controller and its removal does not prove hcloud has finished detaching. The
+// gap between the two is enough to destroy a server with a live filesystem on it,
+// which leaves the volume needing recovery and, on reattach, can wedge the mount
+// in the kernel.
+//
+// This deliberately lives here rather than in the instance provider. The orphan
+// server sweep deletes through that provider too, and an orphan whose volume is
+// stuck must stay reclaimable -- otherwise it bills indefinitely, which is the
+// failure that sweep exists to prevent.
+//
+// Every uncertain path returns false (proceed with the delete). A check that
+// cannot answer must not be able to block termination.
+func (cp *CloudProvider) awaitingVolumeDetachment(ctx context.Context, nodeClaim *karpv1.NodeClaim) bool {
+	// Without a deletion timestamp there is no clock to bound the wait against,
+	// so waiting could never end. Behave as if the check were not here.
+	if nodeClaim.DeletionTimestamp == nil {
+		return false
+	}
+	if time.Since(nodeClaim.DeletionTimestamp.Time) >= VolumeDetachmentTimeout {
+		logf.FromContext(ctx).Info("deleting server with volumes still attached: detachment grace elapsed",
+			"providerID", nodeClaim.Status.ProviderID,
+			"grace", VolumeDetachmentTimeout.String())
+		return false
+	}
+
+	// A server we cannot read is not a server we can make claims about. Fall
+	// through so Delete reports whatever the real state is, including the
+	// NodeClaimNotFoundError that tells core termination has finished.
+	server, err := cp.instanceProvider.Get(ctx, nodeClaim.Status.ProviderID)
+	if err != nil || server == nil {
+		return false
+	}
+	if len(server.Volumes) == 0 {
+		return false
+	}
+
+	logf.FromContext(ctx).Info("waiting for volumes to detach before deleting server",
+		"providerID", nodeClaim.Status.ProviderID,
+		"volumes", len(server.Volumes))
+	return true
 }
 
 // Get retrieves the NodeClaim corresponding to the given provider ID.
