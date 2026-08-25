@@ -45,6 +45,27 @@ var (
 		Help:      "Total number of Hetzner server delete calls by result.",
 	}, []string{"result"})
 
+	// nodesPriceUnresolved reports how many Karpenter-owned nodes currently price
+	// at zero, because their zone and capacity-type match no offering of their
+	// instance type. Karpenter cannot consolidate a node it prices at zero:
+	// nothing is cheaper, so every replacement is rejected and the decision reads
+	// as a considered "Can't replace with a cheaper node". A gauge, not a counter,
+	// because the question is how many are broken right now.
+	nodesPriceUnresolved = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "nodes_price_unresolved",
+		Help:      "Karpenter-owned nodes whose price does not resolve to any offering, disabling consolidation for them.",
+	})
+
+	// priceHealthScanTotal counts scans by result. A gauge reads zero from process
+	// start, so "no broken nodes" and "the check has never managed to run" are the
+	// same number; only a rising success count says the zero is real.
+	priceHealthScanTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "price_health_scan_total",
+		Help:      "Outcomes of the node price-resolution scan.",
+	}, []string{"result"})
+
 	// hcloudAPICallsTotal counts hcloud API calls by operation and result. We
 	// scope it to the operations we actually instrument (server_create,
 	// server_delete, placement_group, image_list) to keep label cardinality
@@ -78,7 +99,21 @@ func init() {
 		hcloudAPICallsTotal,
 		driftDetectedTotal,
 		instanceTypeCacheTotal,
+		nodesPriceUnresolved,
+		priceHealthScanTotal,
 	)
+}
+
+// SetNodesPriceUnresolved records how many nodes currently fail price
+// resolution. Call it on every successful scan, including with zero, so the
+// gauge falls back to healthy once the cause is fixed.
+func SetNodesPriceUnresolved(n int) {
+	nodesPriceUnresolved.Set(float64(n))
+}
+
+// RecordPriceHealthScan records whether a price-resolution scan completed.
+func RecordPriceHealthScan(result string) {
+	priceHealthScanTotal.WithLabelValues(result).Inc()
 }
 
 // RecordServerCreate records a server create result and its duration.
