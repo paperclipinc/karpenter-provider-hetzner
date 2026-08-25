@@ -149,8 +149,55 @@ Provisioned nodes carry, in addition to the well-known Karpenter labels:
 | `labels` | `map[string]string` | no | — | Extra hcloud labels on the Hetzner server (useful for cost attribution or firewall label-selectors) |
 | `userData` | `string` | no | — | Inline cloud-init / Talos machine config. Overridden by `userDataSecretRef` when both are set. |
 | `userDataSecretRef` | `object {namespace, name, key}` | no | — | Source `userData` from a Secret instead of inline. The Secret is read at server-create time; its value never appears in the NodeClass spec or git. Takes precedence over `userData`. |
+| `kubelet.systemReserved` | `map[string]string` | no | — | What your bootstrap passes to the kubelet as `--system-reserved`. Keys: `cpu`, `memory`, `ephemeral-storage`, `pid`. |
+| `kubelet.kubeReserved` | `map[string]string` | no | — | What your bootstrap passes as `--kube-reserved`. Same keys. |
+| `kubelet.evictionHard` | `map[string]string` | no | `memory.available: 100Mi`, `nodefs.available: 10%` | What your bootstrap passes as `--eviction-hard`. Values are a quantity (`400Mi`) or a percentage (`10%`). |
 
 Status exposes `conditions` (`ImagesReady`, `NetworkReady`, `ResourcesReady`, `UserDataReady`, aggregated into `Ready`) and `resolvedImages` (image ID per architecture).
+
+### Declaring kubelet reservations
+
+Karpenter decides which server type a pod fits on by subtracting reserved
+resources from a type's capacity. It cannot see your bootstrap, so anything your
+userData reserves has to be declared here as well:
+
+```yaml
+spec:
+  kubelet:
+    systemReserved: {cpu: 200m, memory: 512Mi}
+    kubeReserved:   {cpu: 200m, memory: 512Mi}
+    evictionHard:   {memory.available: 400Mi}
+```
+
+**These values describe your userData; they do not configure it.** Setting them
+here does not change what the node reserves, and the two must be kept in
+agreement. Declaring less than the bootstrap actually reserves is the failure
+worth knowing about: Karpenter then believes a server is larger than it is,
+picks one too small for the pod, and the pod stays `Pending` while the empty node
+is consolidated away and replaced — indefinitely, without an error anywhere.
+
+Karpenter's own `nodeclaim/consistency` check will not catch this. It compares
+capacity rather than allocatable, and only reports a shortfall beyond 10%.
+
+If your bootstrap sets no reservations, omit the block: the kubelet's own
+defaults are modelled already.
+
+### Advertised vs. usable memory
+
+Hetzner advertises the memory a VM is allocated, but the guest kernel never sees
+all of it — firmware, the kernel image and per-page structures take a cut that
+grows with the size of the machine. A server advertised as 32Gi reports about
+31.3Gi; one advertised as 4Gi reports about 3.7Gi.
+
+The provider holds back `VM_MEMORY_OVERHEAD_PERCENT` (default `0.075`) to cover
+this. It is only an estimate, and it is only used until a node of that server
+type and image registers: from then on the capacity that node reported is used
+instead, keyed by server type and resolved image. Look for
+`recorded server type memory capacity measured from a registered node` in the
+logs.
+
+If nodes still register smaller than Karpenter expected, raise the percentage.
+Lower it only with measurements in hand.
 
 ## Examples
 
@@ -177,6 +224,7 @@ comments explaining every field.
 |---------|----------|-------------|
 | `HCLOUD_TOKEN` | yes | Hetzner Cloud API token |
 | `CLUSTER_NAME` | yes | Cluster identifier; scopes managed servers |
+| `VM_MEMORY_OVERHEAD_PERCENT` | no (0.075) | Fraction of advertised memory assumed invisible to the guest, used until a node of that type reports its real capacity. Must be `>= 0` and `< 1`. |
 | `METRICS_PORT` | no (8080) | Prometheus metrics port |
 | `HEALTH_PROBE_PORT` | no (8081) | Health/readiness probe port |
 
