@@ -16,6 +16,7 @@ import (
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/pricehealth"
 	hetznerop "github.com/paperclipinc/karpenter-provider-hetzner/pkg/operator"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
@@ -60,6 +61,13 @@ func main() {
 	// Our NodeClass status controller (network + image validation, Ready).
 	nodeClassController := nodeclass.NewController(op.GetClient(), &hcloudClient.Network, &hcloudClient.Firewall, &hcloudClient.SSHKey, imageProvider)
 
+	// Report nodes Karpenter cannot price. A node priced at zero can never be
+	// consolidated, and the resulting "Can't replace with a cheaper node" reads
+	// as a decision rather than a broken lookup, so the failure is otherwise
+	// silent. Takes the decorated cloud provider because that is what core prices
+	// against: per NodePool, filtered to that NodeClass's locations.
+	priceHealthController := pricehealth.NewController(op.GetClient(), cloudProvider)
+
 	// Wire and start all controllers.
 	op.WithControllers(ctx, append(
 		controllers.NewControllers(
@@ -74,5 +82,6 @@ func main() {
 			op.InstanceTypeStore,
 		),
 		nodeClassController,
+		priceHealthController,
 	)...).Start(ctx)
 }

@@ -49,6 +49,56 @@ version tag in production.
 
 A `NodePool` references an `HCloudNodeClass`. When pods are unschedulable, Karpenter asks this provider for instance types, picks the cheapest compatible offering, creates the server, and the node joins the cluster.
 
+### Node zone labels and consolidation
+
+Offerings are keyed on the Hetzner **location** — `topology.kubernetes.io/zone=nbg1`.
+Karpenter prices a running node by looking its zone and capacity-type up against
+its instance type's offerings, so a node's zone label has to be a location too.
+
+`hcloud-cloud-controller-manager` labels nodes with the legacy **datacenter**
+(`nbg1-dc3`) by default. That lookup misses, the node prices at zero, and because
+nothing is cheaper than zero every candidate replacement is rejected. Karpenter
+reports `Unconsolidatable: "Can't replace with a cheaper node"` on every node,
+indefinitely — which reads like a considered decision rather than a broken
+lookup.
+
+The tell is two signals together:
+
+```
+karpenter_nodepools_cost_total   -> non-zero and correct
+every disruption decision        -> savings: $0.00
+```
+
+Both at once is conclusive. Cost stays right because it reads the NodeClaim's
+labels, not the Node's, so spend looks healthy while rightsizing is dead.
+
+**Fix:** set `HCLOUD_INSTANCES_ZONE_LABEL_ENABLED=false` on the CCM (v1.35.0+).
+Karpenter's registration then fills the label from the NodeClaim, giving the
+location. Two caveats: it applies only at node initialization, so existing nodes
+must be recreated; and it is cluster-wide, so any node Karpenter does *not*
+register ends up with no zone label at all — which fails to price for the same
+reason.
+
+`karpenter_hetzner_nodes_price_unresolved` counts registered Karpenter-owned
+nodes whose price does not resolve, whatever the cause, and the operator logs a
+sample with their instance type and zone. Anything above zero means
+consolidation is disabled for that many nodes.
+
+Alert on it together with `karpenter_hetzner_price_health_scan_total`. A gauge
+reads zero from process start, so "no broken nodes" and "the check has never
+run" are the same number; only a rising `result="success"` says the zero is real.
+Aggregate with `max()` across replicas, since the check runs on the leader and a
+standby reports zero.
+
+The check asks each NodePool for its own instance types rather than the whole
+catalogue, because that is what Karpenter prices against: narrowing a
+NodeClass's `locations` leaves existing nodes outside it unpriceable, and a
+catalogue-wide lookup would resolve them and report healthy.
+
+Hetzner removes datacenters from its API on 2026-10-01, after which the CCM's
+zone label has to change anyway, so the datacenter half of this may resolve
+itself. The missing-label half will not.
+
 ## Installation
 
 You need a Hetzner Cloud API token with read/write access and a Kubernetes cluster on Hetzner (the [hcloud Cloud Controller Manager](https://github.com/hetznercloud/hcloud-cloud-controller-manager) should set node provider IDs as `hcloud://<id>`).
