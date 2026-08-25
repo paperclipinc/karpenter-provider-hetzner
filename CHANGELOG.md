@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Go toolchain bumped to 1.26.7 (from 1.26.5), clearing five stdlib vulnerabilities flagged by govulncheck (GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, GO-2026-5026; all fixed by 1.26.6). The release image builder is pinned to `golang:1.26.7-alpine` so the shipped binary is built with the same toolchain CI tests with. Local builds now require Go >= 1.26.7.
+- `make vendor-core-crds` downloads the `sigs.k8s.io/karpenter` module before resolving its directory, fixing `generate` CI failures on any PR that changes `go.mod`/`go.sum` (cold module cache made `go list -m` return an empty dir).
+
 ## [2.1.0] - 2026-08-01
 
 ### Fixed

@@ -30,7 +30,9 @@ generate: vendor-core-crds
 # feature gates that default to false, and this chart does not expose them.
 vendor-core-crds:
 	@set -eu; \
+	go mod download sigs.k8s.io/karpenter; \
 	dir="$$(go list -m -f '{{.Dir}}' sigs.k8s.io/karpenter)"; \
+	[ -n "$$dir" ] || { echo "sigs.k8s.io/karpenter not found in module cache" >&2; exit 1; }; \
 	for crd in karpenter.sh_nodepools.yaml karpenter.sh_nodeclaims.yaml; do \
 		cp "$$dir/pkg/apis/crds/$$crd" charts/karpenter-provider-hetzner/crds/$$crd; \
 		chmod u+w charts/karpenter-provider-hetzner/crds/$$crd; \
