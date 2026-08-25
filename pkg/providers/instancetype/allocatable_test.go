@@ -120,6 +120,54 @@ func TestAllocatable_WithinBudgetOfRegisteredNode(t *testing.T) {
 	}
 }
 
+// TestAllocatable_NoKubeletConfigKeepsLegacyReservation pins the upgrade path.
+//
+// Before this package read reservations from the node class it subtracted a flat
+// 100m/100Mi from every type. A node class that declares no kubelet block has
+// said nothing about its bootstrap, so silently dropping that to zero would raise
+// advertised CPU on upgrade -- the wrong direction, and invisible. Absent means
+// "unchanged", not "nothing reserved".
+func TestAllocatable_NoKubeletConfigKeepsLegacyReservation(t *testing.T) {
+	st := makeServerType("cx23", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40, testPricings)
+	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
+	p := NewProvider(client, operator.DefaultVMMemoryOverheadPercent)
+
+	types, err := p.List(context.Background(), &apiv1.HCloudNodeClass{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cpu := types[0].Allocatable()[corev1.ResourceCPU]
+	if cpu.MilliValue() != 1900 {
+		t.Errorf("expected 1900m (2 cores less the legacy 100m reserve), got %dm", cpu.MilliValue())
+	}
+}
+
+// A node class that does declare a kubelet block is taken at its word: the
+// legacy default must not be added on top of what the operator stated.
+func TestAllocatable_DeclaredKubeletOverridesLegacyDefault(t *testing.T) {
+	st := makeServerType("cx23", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40, testPricings)
+	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
+	p := NewProvider(client, operator.DefaultVMMemoryOverheadPercent)
+
+	nc := &apiv1.HCloudNodeClass{
+		Spec: apiv1.HCloudNodeClassSpec{
+			Kubelet: &apiv1.KubeletConfiguration{
+				KubeReserved: map[string]string{"cpu": "250m"},
+			},
+		},
+	}
+	types, err := p.List(context.Background(), nc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cpu := types[0].Allocatable()[corev1.ResourceCPU]
+	if cpu.MilliValue() != 1750 {
+		t.Errorf("expected 1750m (2 cores less the declared 250m), got %dm", cpu.MilliValue())
+	}
+}
+
 // TestAllocatable_NoKubeletConfig falls back to advertised-minus-VM-overhead
 // when the NodeClass declares no reservations. The result must still not exceed
 // the machine's real capacity, since the VM overhead applies regardless.

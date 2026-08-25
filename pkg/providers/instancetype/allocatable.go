@@ -36,11 +36,29 @@ func overheadFor(nodeClass *apiv1.HCloudNodeClass, capacity corev1.ResourceList)
 	overhead := &cloudprovider.InstanceTypeOverhead{
 		EvictionThreshold: evictionThreshold(kubelet, capacity),
 	}
-	if kubelet != nil {
-		overhead.KubeReserved = parseResourceList(kubelet.KubeReserved)
-		overhead.SystemReserved = parseResourceList(kubelet.SystemReserved)
+	if kubelet == nil {
+		// A node class that declares nothing has said nothing about its bootstrap,
+		// which is not the same as saying it reserves nothing. Before this package
+		// read reservations from the node class it subtracted a flat 100m/100Mi
+		// from every type; keeping that as the undeclared default means upgrading
+		// cannot silently raise a node's advertised capacity, which would push pods
+		// onto machines that never had room for them.
+		overhead.KubeReserved = legacyDefaultKubeReserved()
+		return overhead
 	}
+	overhead.KubeReserved = parseResourceList(kubelet.KubeReserved)
+	overhead.SystemReserved = parseResourceList(kubelet.SystemReserved)
 	return overhead
+}
+
+// legacyDefaultKubeReserved is what this provider reserved on every server type
+// before reservations became declarable. It applies only when a node class omits
+// the kubelet block entirely; one that declares a block is taken at its word.
+func legacyDefaultKubeReserved() corev1.ResourceList {
+	return corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("100Mi"),
+	}
 }
 
 // evictionThreshold models the memory and disk the kubelet holds back to keep

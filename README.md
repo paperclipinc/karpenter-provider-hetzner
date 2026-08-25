@@ -179,8 +179,11 @@ is consolidated away and replaced — indefinitely, without an error anywhere.
 Karpenter's own `nodeclaim/consistency` check will not catch this. It compares
 capacity rather than allocatable, and only reports a shortfall beyond 10%.
 
-If your bootstrap sets no reservations, omit the block: the kubelet's own
-defaults are modelled already.
+Omitting the block leaves the previous behaviour in place — a flat `100m`/`100Mi`
+reserve plus the kubelet's own default eviction thresholds — so upgrading cannot
+silently raise a node's advertised capacity. Declaring a block replaces that
+default with exactly what you state, so declare everything your bootstrap
+reserves, not just the parts that differ.
 
 ### Advertised vs. usable memory
 
