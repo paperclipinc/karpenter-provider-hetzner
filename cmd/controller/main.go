@@ -15,6 +15,7 @@ import (
 	_ "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
 
 	hetznercp "github.com/paperclipinc/karpenter-provider-hetzner/pkg/cloudprovider"
+	instancetypecapacity "github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/instancetype/capacity"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/controllers/nodeclass"
 	hetznerop "github.com/paperclipinc/karpenter-provider-hetzner/pkg/operator"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
@@ -74,5 +75,6 @@ func main() {
 			op.InstanceTypeStore,
 		),
 		nodeClassController,
+		instancetypecapacity.NewController(op.GetClient(), typeProvider),
 	)...).Start(ctx)
 }

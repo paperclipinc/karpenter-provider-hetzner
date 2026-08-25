@@ -68,6 +68,12 @@ spec:
                   key: {{ .Values.auth.secretRef.key }}
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
+            # Emitted unconditionally rather than through `with`, which skips
+            # falsy values: 0 is a legitimate setting (trust Hetzner's advertised
+            # memory exactly) and must reach the operator, not fall back to the
+            # default.
+            - name: VM_MEMORY_OVERHEAD_PERCENT
+              value: {{ .Values.vmMemoryOverheadPercent | quote }}
             - name: METRICS_PORT
               value: {{ .Values.metrics.port | quote }}
             - name: HEALTH_PROBE_PORT
