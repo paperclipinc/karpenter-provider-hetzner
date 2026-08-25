@@ -36,7 +36,8 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `clusterName` | `""` (required) | Scopes which servers the controller manages |
+| `clusterName` | `""` (required) | Scopes which servers the controller manages; must be unique per Hetzner project |
+| `instanceGarbageCollection.mode` | `enabled` | `enabled`, `observe` (report what would be reclaimed, delete nothing) or `disabled` (see values.yaml) |
 | `replicas` | `1` | Controller replicas |
 | `image.repository` | `ghcr.io/paperclipinc/karpenter-provider-hetzner` | Image |
 | `image.tag` | `""` | Empty tracks the chart appVersion; pin a tag in production |
@@ -86,4 +87,12 @@ When `serviceMonitor.enabled=true` the chart creates:
 - a `Service` named `karpenter-provider-hetzner-metrics` exposing port `http-metrics`
 - a `ServiceMonitor` that selects that Service and scrapes `/metrics` at the configured interval
 
-Requires the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) CRDs to be present. The controller exposes provider metrics under the `karpenter_hetzner_` prefix (server creates/deletes, durations, drift reasons, instance-type cache hits/misses, and raw hcloud API call counts).
+Requires the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) CRDs to be present. The controller exposes provider metrics under the `karpenter_hetzner_` prefix (server creates/deletes, durations, drift reasons, instance-type cache hits/misses, orphaned-server garbage-collection outcomes, adopted servers, unpriceable nodes, and raw hcloud API call counts).
+
+Worth an alert:
+
+- `karpenter_hetzner_orphaned_server_gc_total{result="error"}` — a server cannot be reclaimed and is still billing.
+- `karpenter_hetzner_server_adopt_total{result="declined"}` — a NodeClaim keeps colliding with a server adoption refuses to take.
+- `karpenter_hetzner_orphaned_server_gc_total{result="skipped_foreign_cluster"}` — servers carry this cluster's `clusterName` but another cluster's UID. Either two clusters share a name in one Hetzner project, or this cluster's control plane was rebuilt and these servers predate it. Either way they will never be reclaimed.
+
+Note that the metrics endpoint is scraped on every replica, but the sweeps behind these metrics run only on the leader. Aggregate with `max()` rather than `avg()`/`min()`, or a standby's zero will read as a healthy cluster.

@@ -52,6 +52,24 @@ args: []
 # Required: scopes managed servers so multiple clusters can share one Hetzner project.
 clusterName: ""
 
+# The operator reclaims servers Karpenter no longer has a NodeClaim for, which
+# would otherwise run and bill with nothing pointing at them.
+instanceGarbageCollection:
+  # enabled  - reclaim orphaned servers.
+  # observe  - run every check and report what WOULD be reclaimed, deleting
+  #            nothing. Start here on an existing fleet: watch
+  #            karpenter_hetzner_orphaned_server_gc_total{result="would_reap"},
+  #            satisfy yourself it names the right machines, then switch to
+  #            enabled. A kill switch only helps after something has gone wrong.
+  # disabled - do not sweep at all. For maintenance that removes NodeClaims
+  #            wholesale (reinstalling the CRDs, restoring etcd, clearing
+  #            finalizers by hand), so the sweep does not act on a cluster that
+  #            only looks empty. Provisioning and disruption keep working.
+  #
+  # An unrecognised value stops the operator starting rather than falling back
+  # to enabled: a typo here would reap the fleet it was meant to protect.
+  mode: enabled
+
 metrics:
   port: 8080
 healthProbe:

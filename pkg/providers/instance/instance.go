@@ -40,6 +40,16 @@ type Provider struct {
 	pgClient    PlacementGroupClient
 	waiter      ActionWaiter
 	clusterName string
+
+	// clusterUID identifies this cluster independently of its operator-chosen
+	// name, so two clusters sharing a CLUSTER_NAME in one Hetzner project can
+	// still tell their servers apart.
+	//
+	// Empty does not mean "no check": creates then stamp no UID, but adoption
+	// still refuses every server that carries one, because a UID that is present
+	// and different is the refusal rule. Only the test constructors leave it
+	// empty; production reads it at startup and refuses to run without it.
+	clusterUID string
 }
 
 // NewProvider returns a Provider that does NOT wait for hcloud actions to
@@ -59,8 +69,11 @@ func NewProviderWithWaiter(client ServerClient, clusterName string, waiter Actio
 // NewProviderWithPlacementGroups returns a Provider that supports placement
 // groups and waits for hcloud create actions to complete. This is the
 // production constructor.
-func NewProviderWithPlacementGroups(client ServerClient, pgClient PlacementGroupClient, clusterName string, waiter ActionWaiter) *Provider {
-	return &Provider{client: client, pgClient: pgClient, waiter: waiter, clusterName: clusterName}
+func NewProviderWithPlacementGroups(client ServerClient, pgClient PlacementGroupClient, clusterName, clusterUID string, waiter ActionWaiter) *Provider {
+	return &Provider{
+		client: client, pgClient: pgClient, waiter: waiter,
+		clusterName: clusterName, clusterUID: clusterUID,
+	}
 }
 
 // CreateOpts contains all parameters needed to create a Hetzner server node.
@@ -135,12 +148,15 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 // create is the internal implementation of Create, instrumented by Create().
 func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server, error) {
 	log := logf.FromContext(ctx)
-	labels := make(map[string]string, len(opts.Labels)+3)
+	labels := make(map[string]string, len(opts.Labels)+4)
 	for k, v := range opts.Labels {
 		labels[k] = v
 	}
 	labels[apiv1.ServerLabelManagedBy] = apiv1.ServerValueManagedBy
 	labels[apiv1.ServerLabelCluster] = p.clusterName
+	if p.clusterUID != "" {
+		labels[apiv1.ServerLabelClusterUID] = p.clusterUID
+	}
 	if opts.NodeClaim != "" {
 		labels[apiv1.ServerLabelNodeClaim] = opts.NodeClaim
 	}
@@ -198,6 +214,30 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 
 	result, _, err := p.client.Create(ctx, createOpts)
 	if err != nil {
+		// Hetzner rejects duplicate server names. Reaching this means a previous
+		// attempt already created the server but we never recorded its ID —
+		// typically because the process died between the create call and the
+		// status write. The server is running and billing with no owner, and its
+		// name and labels are the only surviving record of it, so adopt it rather
+		// than retrying into the same collision forever.
+		if adopted := p.adoptOrphan(ctx, opts, err); adopted != nil {
+			imageID := int64(0)
+			if adopted.Image != nil {
+				imageID = adopted.Image.ID
+			}
+			pgName := ""
+			if adopted.PlacementGroup != nil {
+				pgName = adopted.PlacementGroup.Name
+			}
+			// Log the shape actually adopted, not the shape requested: these are
+			// the fields that would reveal a machine whose placement group or image
+			// diverges from what this request would have built.
+			log.Info("adopted orphaned server",
+				"name", adopted.Name, "id", adopted.ID,
+				"serverType", opts.ServerType, "location", opts.Location,
+				"imageID", imageID, "placementGroup", pgName, "status", string(adopted.Status))
+			return adopted, nil
+		}
 		return nil, MapCreateError(err)
 	}
 
@@ -211,6 +251,21 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		actions = append(actions, result.NextActions...)
 		if len(actions) > 0 {
 			if err := p.waiter.WaitFor(ctx, actions...); err != nil {
+				// The server exists. Walking away leaves it running and billing with
+				// nothing pointing at it, and a later retry would then adopt a machine
+				// whose provisioning actions are known to have failed -- turning a
+				// loud repeated error into a silent success. Clean it up so adoption's
+				// only input stays the crash case, where the machine is healthy.
+				//
+				// The cleanup runs on a context detached from the caller's. WaitFor
+				// returns ctx.Err() when that context is cancelled -- a SIGTERM, a lost
+				// leader lease, a reconcile deadline -- which is the likeliest way to
+				// reach this branch at all, and reusing the dead context would fail the
+				// delete before it issued a single request, leaking exactly the server
+				// this is here to reclaim.
+				if result.Server != nil {
+					p.deleteAfterFailedCreate(ctx, opts.Name, result.Server.ID)
+				}
 				return nil, fmt.Errorf("waiting for server %q create actions: %w", opts.Name, err)
 			}
 		}
@@ -228,6 +283,125 @@ func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 		"placementGroupAttached", pgAttached,
 	)
 	return result.Server, nil
+}
+
+// createCleanupTimeout bounds the compensating delete issued when a create's
+// actions fail. That delete runs on a context detached from the caller's, so it
+// needs a deadline of its own rather than inheriting one.
+const createCleanupTimeout = 30 * time.Second
+
+// deleteAfterFailedCreate terminates a server whose create actions did not
+// complete. It goes through the instrumented Delete so the call shows up in
+// server_delete_total like every other deletion this provider issues.
+func (p *Provider) deleteAfterFailedCreate(ctx context.Context, name string, serverID int64) {
+	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createCleanupTimeout)
+	defer cancel()
+	if err := p.Delete(delCtx, FormatProviderID(serverID)); err != nil &&
+		!karpcp.IsNodeClaimNotFoundError(err) {
+		logf.FromContext(ctx).Error(err, "deleting a server whose create actions failed",
+			"name", name, "id", serverID)
+	}
+}
+
+// adoptOrphan returns the server that caused a uniqueness_error, provided this
+// provider owns it and it is the server this call asked for. It returns nil for
+// any other error, when the lookup fails, or when the existing server does not
+// match — adopting a server belonging to another cluster would hand it to
+// Karpenter for deletion, and adopting one of a different shape would make the
+// NodeClaim advertise capacity and a zone the machine does not have.
+//
+// Declining leaves the original create error to surface. Note that the garbage
+// collector will NOT reclaim the server while this NodeClaim is retrying: it
+// treats the nodeclaim label as proof of ownership precisely so that an
+// in-flight create is never destroyed. Recovery comes when Karpenter gives up on
+// the NodeClaim, after which the name frees and the sweep reclaims the machine.
+func (p *Provider) adoptOrphan(ctx context.Context, opts CreateOpts, createErr error) *hcloud.Server {
+	if !hcloud.IsError(createErr, hcloud.ErrorCodeUniquenessError) {
+		return nil
+	}
+	log := logf.FromContext(ctx)
+	servers, err := p.client.AllWithOpts(ctx, hcloud.ServerListOpts{Name: opts.Name})
+	if err != nil {
+		// Without this the failed recovery is invisible: the caller only ever sees
+		// the original uniqueness error, with no sign adoption was even attempted.
+		log.Error(err, "looking up the server behind a name collision", "name", opts.Name)
+		metrics.RecordServerAdopt(metrics.AdoptError)
+		return nil
+	}
+	for _, s := range servers {
+		if s.Name != opts.Name {
+			continue
+		}
+		// The name label alone is not proof of ownership: CLUSTER_NAME is
+		// operator-supplied and not unique. Adoption hands a live machine to
+		// Karpenter, which will eventually terminate it, so taking one belonging to
+		// a same-named cluster would destroy their node. Shared with the orphan
+		// sweep, which deletes on the same answer.
+		if !apiv1.OwnedByCluster(s.Labels, p.clusterName, p.clusterUID) {
+			// Refusing a server that is ours-by-name but not ours-by-UID needs its
+			// own signal. Folded into the generic "declined" below it would carry the
+			// wrong remedy: an ordinary decline clears once the NodeClaim expires and
+			// the sweep reclaims the machine, but the sweep refuses this server for
+			// the same reason adoption did, so nothing ever reclaims it.
+			if s.Labels[apiv1.ServerLabelManagedBy] == apiv1.ServerValueManagedBy &&
+				s.Labels[apiv1.ServerLabelCluster] == p.clusterName {
+				log.Info("refusing to adopt a server stamped with a different cluster UID; "+
+					"either two clusters share a CLUSTER_NAME in one Hetzner project, or this "+
+					"cluster's control plane was rebuilt and this server predates it",
+					"name", s.Name, "ourClusterUID", p.clusterUID,
+					"theirClusterUID", s.Labels[apiv1.ServerLabelClusterUID])
+				metrics.RecordServerAdopt(metrics.AdoptForeignCluster)
+				return nil
+			}
+			continue
+		}
+		// Only a server this same NodeClaim created is evidence of a lost create.
+		// userData, SSH keys and public-IP policy are invisible on the returned
+		// server and are not drift-checked either, so matching the NodeClaim is
+		// what makes it safe to assume the machine was built from these inputs.
+		// Networks and firewalls do have drift checks in pkg/cloudprovider, so a
+		// mismatch there self-heals. The placement group is the gap: it is visible
+		// (the caller logs it) but neither checked here nor drift-checked, so an
+		// adopted server outside its spread group stays that way for life.
+		if opts.NodeClaim == "" || s.Labels[apiv1.ServerLabelNodeClaim] != opts.NodeClaim {
+			continue
+		}
+		// The normal path waits on the create actions before returning, which is
+		// how the caller knows the machine is really coming up. Adoption cannot
+		// wait — those action handles are gone — so require the server to be
+		// running or still coming up. Anything else (off, stopping, deleting,
+		// unknown) would hand Karpenter a NodeClaim with capacity nothing starts.
+		if s.Status != hcloud.ServerStatusRunning &&
+			s.Status != hcloud.ServerStatusInitializing &&
+			s.Status != hcloud.ServerStatusStarting {
+			continue
+		}
+		// The caller builds the NodeClaim's capacity and zone labels from the
+		// offering it selected on THIS attempt, not from the server it gets back.
+		// A server left by an earlier attempt that selected a different offering
+		// would be advertised with the wrong shape and the wrong zone — the latter
+		// silently breaking volume scheduling. An unresolved location fails closed
+		// for the same reason: that is the case where the zone is most likely wrong.
+		if s.ServerType == nil || s.ServerType.Name != opts.ServerType {
+			continue
+		}
+		if opts.Location == "" || s.Location == nil || s.Location.Name != opts.Location {
+			continue
+		}
+		// Karpenter records the adopted server's image as the NodeClaim's and then
+		// compares the two to detect image drift, so a mismatch accepted here can
+		// never be detected again.
+		if opts.Image != nil && (s.Image == nil || s.Image.ID != opts.Image.ID) {
+			continue
+		}
+		metrics.RecordServerAdopt(metrics.AdoptAdopted)
+		return s
+	}
+	// A NodeClaim retrying forever into a collision adoption keeps refusing is the
+	// state that leaves a machine billing, so it needs its own signal rather than
+	// looking like an ordinary create error.
+	metrics.RecordServerAdopt(metrics.AdoptDeclined)
+	return nil
 }
 
 // Delete removes the server identified by providerID. It returns nil once the
