@@ -212,6 +212,15 @@ func cx22Type() *hcloud.ServerType {
 func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.ServerType) (
 	*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
 	t.Helper()
+	return buildCPWithImages(t, nc, types,
+		[]*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}})
+}
+
+// buildCPWithImages is buildCPWithTypes with an explicit image catalogue, for tests that
+// need the live image lookup to fail or to return something other than image 42.
+func buildCPWithImages(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.ServerType,
+	images []*hcloud.Image) (*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
+	t.Helper()
 	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	if nc.Name == "" {
 		nc.Name = "default"
@@ -219,7 +228,7 @@ func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.S
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: types}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
+	imgc := &fakeImageClient{images: images}
 	typeProvider := instancetype.NewProvider(stc)
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
@@ -1047,5 +1056,102 @@ func TestCreate_TieBreaksDeterministically(t *testing.T) {
 		if got := fsc.lastOpts.ServerType.Name; got != "ccx13" {
 			t.Errorf("order %d: tie resolved to %q, want the deterministic winner ccx13", i, got)
 		}
+	}
+}
+
+// TestGetInstanceTypes_MarksImagelessArchUnavailable verifies that architectures the
+// NodeClass has no image for are advertised to karpenter core as unavailable, while
+// staying in the catalogue.
+//
+// Availability and membership do different jobs here. The scheduler's fits() gates on
+// an available compatible offering, so dropping availability stops core scheduling onto
+// an architecture Create will refuse -- without it, core creates a NodeClaim, Create
+// returns NodeClassNotReadyError, core deletes the claim, and the next cycle recreates
+// the identical claim forever with no backoff. Drift, by contrast, checks
+// Offerings.HasCompatible with no Available() filter, so keeping the offering listed
+// means running nodes of that type are not drifted and replaced. This is the same
+// mechanism already used for unpriced offerings.
+func TestGetInstanceTypes_MarksImagelessArchUnavailable(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
+	}
+	types := []*hcloud.ServerType{armType("cax31", "0.0100"), hourlyType("cx43", 8, 16, "0.0260")}
+	cp, _, _ := buildCPWithTypes(t, nc, types)
+
+	nodePool := &karpv1.NodePool{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodePool.Spec.Template.Spec.NodeClassRef = &karpv1.NodeClassReference{
+		Name: "default", Group: apiv1.Group, Kind: "HCloudNodeClass",
+	}
+
+	its, err := cp.GetInstanceTypes(context.Background(), nodePool)
+	if err != nil {
+		t.Fatalf("GetInstanceTypes: %v", err)
+	}
+	byName := map[string]*karpcp.InstanceType{}
+	for _, it := range its {
+		byName[it.Name] = it
+	}
+
+	arm, ok := byName["cax31"]
+	if !ok {
+		t.Fatal("cax31 was removed from the catalogue; running arm nodes would drift")
+	}
+	if len(arm.Offerings.Available()) != 0 {
+		t.Error("cax31 has no resolved image but is still advertised as available; core will schedule onto it")
+	}
+	if len(arm.Offerings) == 0 {
+		t.Error("cax31 offerings were dropped rather than marked unavailable")
+	}
+
+	amd, ok := byName["cx43"]
+	if !ok {
+		t.Fatal("cx43 missing from catalogue")
+	}
+	if len(amd.Offerings.Available()) == 0 {
+		t.Error("cx43 has a resolved image and must stay available")
+	}
+}
+
+// TestCreate_LaunchesStatusResolvedImageID verifies that the launch uses the image the
+// gate admitted the architecture on, rather than re-deriving one live. Two sources can
+// disagree: the gate consults status.resolvedImages while a second live lookup could
+// return a different image or fail outright, which is how a candidate could pass
+// selection and then die at image resolution. The status ID is deliberately different
+// from what the image client would return, so only reading status produces it.
+func TestCreate_LaunchesStatusResolvedImageID(t *testing.T) {
+	nc := baselineNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: string(hcloud.ArchitectureX86), ImageID: 99},
+	}
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cx22Type()})
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Image == nil {
+		t.Fatal("no image recorded on create")
+	}
+	if got := fsc.lastOpts.Image.ID; got != 99 {
+		t.Errorf("launched image %d, want 99 from status.resolvedImages (42 means a second live lookup won)", got)
+	}
+}
+
+// TestCreate_LiveImageNotFoundIsTerminal verifies that when status carries no entry for
+// the architecture -- the un-reconciled NodeClass case, where the gate deliberately
+// fails open -- a definitive miss from the live lookup is still classified. A bare error
+// lands in launch.go's default branch, which parks the NodeClaim at Launched=Unknown and
+// requeues it forever; deterministic selection then re-picks the same doomed type every
+// cycle. NodeClassNotReadyError makes core delete the claim instead.
+func TestCreate_LiveImageNotFoundIsTerminal(t *testing.T) {
+	// Empty catalogue: the live lookup definitively finds nothing.
+	cp, _, _ := buildCPWithImages(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()}, nil)
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected an error when no image can be resolved")
+	}
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
 	}
 }

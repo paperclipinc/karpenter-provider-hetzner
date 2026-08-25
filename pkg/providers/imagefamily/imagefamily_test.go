@@ -2,6 +2,7 @@ package imagefamily
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -208,5 +209,41 @@ func TestResolveUbuntu_LabelSelectorForwarded(t *testing.T) {
 	}
 	if got := fc.lastOpts.LabelSelector; got != "role=worker" {
 		t.Fatalf("label selector not forwarded: got %q", got)
+	}
+}
+
+// erroringImages fails every list call, standing in for a 429/5xx from hcloud.
+type erroringImages struct{ err error }
+
+func (e erroringImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return nil, e.err
+}
+
+// TestResolve_DistinguishesNotFoundFromAPIFailure pins the distinction the nodeclass
+// controller depends on. An unreadable catalogue is not evidence that an image is
+// absent: treating it as such clears a resolved architecture from NodeClass status, and
+// instance-type selection then refuses that architecture, so Karpenter deletes
+// NodeClaims over an API blip.
+func TestResolve_DistinguishesNotFoundFromAPIFailure(t *testing.T) {
+	sel := apiv1.ImageSelector{Family: "ubuntu"}
+
+	// Catalogue readable, genuinely empty -> definitive.
+	p := NewProvider(&mockImageClient{})
+	_, err := p.Resolve(context.Background(), sel, hcloud.ArchitectureX86)
+	if err == nil {
+		t.Fatal("expected an error for an empty catalogue")
+	}
+	if !IsNotFound(err) {
+		t.Errorf("empty catalogue should be NotFound, got %T: %v", err, err)
+	}
+
+	// Catalogue unreadable -> must NOT look definitive.
+	p = NewProvider(erroringImages{err: errors.New("rate limited (429)")})
+	_, err = p.Resolve(context.Background(), sel, hcloud.ArchitectureX86)
+	if err == nil {
+		t.Fatal("expected an error when the list call fails")
+	}
+	if IsNotFound(err) {
+		t.Errorf("an API failure must not be reported as NotFound: %v", err)
 	}
 }

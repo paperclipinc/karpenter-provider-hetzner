@@ -98,8 +98,10 @@ type ResolvedImage struct {
 	// Architecture is the hcloud architecture spelling ("x86" or "arm"), not the
 	// Kubernetes one ("amd64"/"arm64"). Instance-type selection compares this value
 	// exactly, so an unrecognised spelling would make every architecture ineligible
-	// while all conditions stayed green.
-	// +kubebuilder:validation:Enum=x86;arm
+	// while all conditions stayed green. Deliberately not a CRD enum: writer and reader
+	// share the SDK constants so the drift cannot occur, while an enum would reject every
+	// status update wholesale on clusters whose CRDs were applied at install and never
+	// upgraded, the first time a third architecture appears.
 	Architecture string `json:"architecture"`
 	ImageID      int64  `json:"imageID"`
 }

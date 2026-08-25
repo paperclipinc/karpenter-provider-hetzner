@@ -256,6 +256,19 @@ func TestToInstanceType_IgnoresLocationAvailableFlag(t *testing.T) {
 	}
 }
 
+func TestList_CacheHit(t *testing.T) {
+	st := makeServerType("cx11", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 1, 2, 20, testPricings)
+	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}
+	p := NewProvider(client)
+
+	_, _ = p.List(context.Background(), nil)
+	_, _ = p.List(context.Background(), nil)
+
+	if client.calls != 1 {
+		t.Errorf("expected 1 API call (cache should be hit on second call), got %d", client.calls)
+	}
+}
+
 func TestList_ReflectsUnavailable(t *testing.T) {
 	st := makeServerType("cx11", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 1, 2, 20, testPricings)
 	client := &mockServerTypeClient{types: []*hcloud.ServerType{st}}

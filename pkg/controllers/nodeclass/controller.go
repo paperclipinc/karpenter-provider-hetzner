@@ -102,17 +102,48 @@ func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (
 	}
 
 	// Image resolution for both architectures.
-	resolved, ierr := c.resolveImages(ctx, nc)
-	if ierr != nil {
-		// Clear rather than leave the previous list in place. Instance-type selection
-		// reads ResolvedImages to decide which architectures are launchable, so a stale
-		// entry keeps steering it at an architecture that no longer has an image.
+	// Merge this pass with what status already holds. Selection reads ResolvedImages to
+	// decide which architectures are launchable, so the two failure modes must not be
+	// conflated: a catalogue that says "no such image" is evidence, a catalogue that
+	// could not be read is not. Treating the latter as the former clears a resolved
+	// architecture and makes Karpenter delete NodeClaims over an API blip.
+	prev := make(map[string]int64, len(nc.Status.ResolvedImages))
+	for _, ri := range nc.Status.ResolvedImages {
+		prev[ri.Architecture] = ri.ImageID
+	}
+	var resolved []apiv1.ResolvedImage
+	var transientErrs, definitiveErrs []error
+	for _, r := range c.resolveImages(ctx, nc) {
+		switch {
+		case r.err == nil:
+			resolved = append(resolved, apiv1.ResolvedImage{Architecture: string(r.arch), ImageID: r.imageID})
+		case r.transient:
+			transientErrs = append(transientErrs, r.err)
+			// Absence is unknown, so carry the last known good entry rather than
+			// reporting this architecture as gone.
+			if id, ok := prev[string(r.arch)]; ok {
+				resolved = append(resolved, apiv1.ResolvedImage{Architecture: string(r.arch), ImageID: id})
+			}
+		default:
+			definitiveErrs = append(definitiveErrs, r.err)
+		}
+	}
+	switch {
+	case len(resolved) > 0:
+		nc.Status.ResolvedImages = resolved
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	case len(transientErrs) > 0:
+		// Nothing resolved, but at least one lookup failed transiently: keep state and
+		// report Unknown, as every other condition here does for an API error.
+		ierr := errors.Join(transientErrs...)
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeImagesReady, "ImageResolutionErrored", ierr.Error())
+		c.warnf(nc, "ImageResolutionErrored", "ResolveImages", "image catalogue unreadable: %v", ierr)
+	default:
+		// The catalogue was readable and holds nothing for any architecture.
+		ierr := errors.Join(definitiveErrs...)
 		nc.Status.ResolvedImages = nil
 		nc.StatusConditions().SetFalse(apiv1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
 		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
-	} else {
-		nc.Status.ResolvedImages = resolved
-		nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
 	}
 
 	if !equality.Semantic.DeepEqual(stored, nc) {
@@ -170,26 +201,38 @@ func (c *Controller) validateUserData(ctx context.Context, nc *apiv1.HCloudNodeC
 	return "", "", false, true
 }
 
-func (c *Controller) resolveImages(ctx context.Context, nc *apiv1.HCloudNodeClass) ([]apiv1.ResolvedImage, error) {
+// imageResolution is the outcome of resolving one architecture. transient marks an
+// error that says nothing about whether the image exists -- the catalogue could not be
+// read -- as opposed to the catalogue reporting no match.
+type imageResolution struct {
+	arch      hcloud.Architecture
+	imageID   int64
+	err       error
+	transient bool
+}
+
+func (c *Controller) resolveImages(ctx context.Context, nc *apiv1.HCloudNodeClass) []imageResolution {
 	// hcloud image IDs are global (not per-location), so resolve one image per
 	// architecture. Resolve each architecture independently: many clusters only
 	// have an image for a single arch (e.g. an all-amd64 cluster has no arm64
 	// Talos snapshot), and a NodeClass is usable as long as at least one arch
-	// resolves. Only fail when NO architecture resolves.
-	var out []apiv1.ResolvedImage
-	var errs []error
-	for _, arch := range []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM} {
+	// resolves.
+	archs := []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM}
+	out := make([]imageResolution, 0, len(archs))
+	for _, arch := range archs {
 		img, err := c.images.Resolve(ctx, nc.Spec.ImageSelector, arch)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", arch, err))
-			continue
+		switch {
+		case err != nil:
+			out = append(out, imageResolution{
+				arch:      arch,
+				err:       fmt.Errorf("%s: %w", arch, err),
+				transient: !imagefamily.IsNotFound(err),
+			})
+		default:
+			out = append(out, imageResolution{arch: arch, imageID: img.ID})
 		}
-		out = append(out, apiv1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no image resolved for any architecture: %w", errors.Join(errs...))
-	}
-	return out, nil
+	return out
 }
 
 // Register wires the controller into the manager.

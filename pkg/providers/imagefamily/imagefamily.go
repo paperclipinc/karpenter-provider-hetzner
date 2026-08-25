@@ -2,6 +2,7 @@ package imagefamily
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,6 +30,26 @@ func labelSelectorString(m map[string]string) string {
 		parts = append(parts, k+"="+m[k])
 	}
 	return strings.Join(parts, ",")
+}
+
+// NotFoundError reports that the image catalogue was read successfully and holds no
+// image matching the selector for this architecture -- as opposed to a failure to read
+// the catalogue at all, where absence is simply unknown. Callers must not treat an
+// unreadable catalogue as proof that no image exists: an HCloudNodeClass that clears a
+// resolved architecture on a 429 makes Karpenter delete NodeClaims over an API blip.
+// Errors that are not a NotFoundError are therefore assumed transient, which is the
+// safe direction: a misclassified transient keeps stale state, a misclassified
+// definitive discards good state.
+type NotFoundError struct{ error }
+
+func newNotFoundError(format string, args ...any) *NotFoundError {
+	return &NotFoundError{error: fmt.Errorf(format, args...)}
+}
+
+// IsNotFound reports whether err means the catalogue definitively lacks the image.
+func IsNotFound(err error) bool {
+	var e *NotFoundError
+	return errors.As(err, &e)
 }
 
 // ImageClient is the narrow interface for the hcloud images API needed by this provider.
@@ -96,9 +117,9 @@ func (p *Provider) resolveUbuntu(ctx context.Context, version string, arch hclou
 	}
 
 	if version != "" {
-		return nil, fmt.Errorf("no ubuntu image found for version %q and arch %q", version, arch)
+		return nil, newNotFoundError("no ubuntu image found for version %q and arch %q", version, arch)
 	}
-	return nil, fmt.Errorf("no ubuntu image found for arch %q", arch)
+	return nil, newNotFoundError("no ubuntu image found for arch %q", arch)
 }
 
 // resolveTalos finds the newest snapshot image whose description contains "talos" and optionally the given version.
@@ -128,9 +149,9 @@ func (p *Provider) resolveTalos(ctx context.Context, version string, arch hcloud
 
 	if best == nil {
 		if version != "" {
-			return nil, fmt.Errorf("no talos snapshot found for version %q and arch %q", version, arch)
+			return nil, newNotFoundError("no talos snapshot found for version %q and arch %q", version, arch)
 		}
-		return nil, fmt.Errorf("no talos snapshot found for arch %q", arch)
+		return nil, newNotFoundError("no talos snapshot found for arch %q", arch)
 	}
 	return best, nil
 }

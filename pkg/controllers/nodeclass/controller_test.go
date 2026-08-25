@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -336,5 +337,90 @@ func TestReconcile_UserDataSecretMissing(t *testing.T) {
 	}
 	if got.StatusConditions().Root().IsTrue() {
 		t.Error("Ready should not be true when UserDataReady is false")
+	}
+}
+
+// unreadableImages fails every list call, standing in for a 429/5xx from hcloud.
+type unreadableImages struct{}
+
+func (unreadableImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return nil, errors.New("rate limited (429)")
+}
+
+// x86OKArmErrors resolves x86 and fails the arm lookup with an API error, the shape of
+// a partial outage: one architecture is genuinely known, the other is merely unreadable.
+type x86OKArmErrors struct{ img *hcloud.Image }
+
+func (f x86OKArmErrors) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	for _, a := range opts.Architecture {
+		if a == hcloud.ArchitectureX86 {
+			return []*hcloud.Image{f.img}, nil
+		}
+	}
+	return nil, errors.New("server error (503)")
+}
+
+// TestReconcile_KeepsResolvedImagesOnTransientError verifies that an unreadable image
+// catalogue does not clear status or declare the images gone. Instance-type selection
+// reads ResolvedImages to decide which architectures are launchable, so clearing on an
+// API blip makes Create reject every candidate and Karpenter delete NodeClaims over a
+// transient error. Every other condition in Reconcile already sets Unknown and keeps
+// state on API errors; images now match.
+func TestReconcile_KeepsResolvedImagesOnTransientError(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{{Architecture: "x86", ImageID: 42}}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(unreadableImages{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.ResolvedImages) != 1 || got.Status.ResolvedImages[0].ImageID != 42 {
+		t.Errorf("last-known-good images discarded on a transient error: %+v", got.Status.ResolvedImages)
+	}
+	if cond := got.StatusConditions().Get(apiv1.ConditionTypeImagesReady); cond.IsFalse() {
+		t.Errorf("transient error reported as definitive (False); want Unknown: %+v", cond)
+	}
+}
+
+// TestReconcile_CarriesForwardArchOnTransientError verifies that when one architecture
+// resolves and the other's lookup fails with an API error, the failing architecture's
+// previous entry is carried forward rather than dropped. Dropping it reads as "this
+// architecture has no image", which makes selection refuse it and Karpenter delete the
+// NodeClaims of an arch-pinned NodePool over an unrelated blip.
+func TestReconcile_CarriesForwardArchOnTransientError(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
+		{Architecture: "x86", ImageID: 42},
+		{Architecture: "arm", ImageID: 43},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(x86OKArmErrors{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	var haveArm bool
+	for _, ri := range got.Status.ResolvedImages {
+		if ri.Architecture == "arm" && ri.ImageID == 43 {
+			haveArm = true
+		}
+	}
+	if !haveArm {
+		t.Errorf("arm entry dropped on an API error instead of carried forward: %+v", got.Status.ResolvedImages)
 	}
 }

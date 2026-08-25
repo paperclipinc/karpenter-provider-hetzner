@@ -184,6 +184,11 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
 				scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, p.Location.Name),
 			),
+			// Price stays 0 when unparseable. Selection is protected by Available, but
+			// core reads a RUNNING node's price via Compatible(...).Cheapest() with no
+			// Available filter, so a 0 here makes that node look free and blocks its
+			// replacement-consolidation until pricing recovers. No representable value
+			// avoids core's 0-fallback; the exposure is bounded by the pricing outage.
 			Price:     price,
 			Available: priced,
 		})
