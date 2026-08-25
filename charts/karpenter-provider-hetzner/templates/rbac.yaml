@@ -15,14 +15,23 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "nodes/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Core resources Karpenter's scheduling simulation observes.
+  # Core resources Karpenter's scheduling simulation observes. "namespaces" is
+  # also load-bearing for startup: the operator reads the kube-system namespace's
+  # UID to identify this cluster and refuses to start without it, so narrowing
+  # this rule takes the whole controller down, not just scheduling.
   - apiGroups: [""]
     resources: ["pods", "persistentvolumes", "persistentvolumeclaims", "replicationcontrollers", "namespaces"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  - apiGroups: [""]
+  # Karpenter core and leader election use the deprecated core-group recorder;
+  # this provider's garbage collector uses the manager's recorder, which writes
+  # to events.k8s.io/v1. RBAC authorizes on (apiGroup, resource), so the core
+  # group alone would 403 every GarbageCollected event -- silently, since only a
+  # klog line reports it, while the README tells operators to validate observe
+  # mode by reading those very events.
+  - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
   - apiGroups: [""]

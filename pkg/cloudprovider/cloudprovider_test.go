@@ -101,6 +101,17 @@ func (f *fakeServerClient) AllWithOpts(_ context.Context, _ hcloud.ServerListOpt
 	return out, nil
 }
 
+func (f *fakeServerClient) Update(_ context.Context, server *hcloud.Server, opts hcloud.ServerUpdateOpts) (*hcloud.Server, *hcloud.Response, error) {
+	s, ok := f.servers[server.ID]
+	if !ok {
+		return nil, nil, hcloud.Error{Code: hcloud.ErrorCodeNotFound, Message: "not found"}
+	}
+	if opts.Labels != nil {
+		s.Labels = opts.Labels
+	}
+	return s, nil, nil
+}
+
 type fakeServerTypeClient struct{ types []*hcloud.ServerType }
 
 func (f *fakeServerTypeClient) All(_ context.Context) ([]*hcloud.ServerType, error) {

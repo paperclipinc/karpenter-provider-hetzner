@@ -25,7 +25,7 @@ version tag in production.
 - **Talos Linux and Ubuntu images**, resolved per architecture.
 - **Placement groups** for spreading nodes across physical hosts.
 - **Cost controls** — opt out of the billed public IPv4 (and/or IPv6) per node class for private-network clusters.
-- **Multi-cluster safe** — every managed server is tagged with the cluster name, so several clusters can share one Hetzner project without touching each other's nodes.
+- **Multi-cluster safe** — every managed server is tagged with the cluster name and the cluster's `kube-system` UID, so several clusters can share one Hetzner project without touching each other's nodes. Servers created before the UID label existed are matched on name alone, so give each cluster a distinct `clusterName` until the fleet has rolled.
 
 ## How it works
 
@@ -66,22 +66,53 @@ Two mechanisms cover this:
   cluster and this NodeClaim and matches the requested type, location and image.
 - **Garbage collection.** A sweep every two minutes reclaims servers Karpenter
   has no NodeClaim for, along with the Node objects they left behind. A server
-  must be seen reapable on three consecutive sweeps, and one whose node is
+  must be seen unowned on several consecutive sweeps, and one whose node is
   registered and still `Ready` is never touched — a machine carrying workloads is
-  core's to drain, not this sweep's to destroy. Sparing a server restarts its
-  count, so a machine the `Ready` guard protected does not sit on a spent grace
-  window waiting for its first NotReady blip.
+  core's to drain, not this sweep's to destroy.
+
+  Every path that declines to act resets the count, so the window always measures
+  an uninterrupted run of sweeps that found nothing in the way; a machine the
+  `Ready` guard protected never sits on a spent window waiting for its first
+  NotReady blip. The count is per-process, so a restart or leader handover starts
+  it again — and the operator must additionally have been sweeping for a full
+  window before it may reclaim anything, so instability delays reclamation rather
+  than authorising it on a short history.
 
 **`clusterName` must be unique per cluster within a Hetzner project.** Servers
 are labelled with it, and the sweep uses that label to decide what it owns. Two
 clusters sharing a name in one project would each see the other's servers as
 unclaimed. The operator therefore also stamps the UID of the cluster's
 `kube-system` namespace on every server it creates and refuses to touch a server
-carrying a different one, logging the collision once. That protects servers
-created from this version onward; servers predating it carry no UID and are
-still matched on name alone, so distinct names remain the thing to get right.
+carrying a different one, logging the collision once and counting it as
+`karpenter_hetzner_orphaned_server_gc_total{result="skipped_foreign_cluster"}` on
+every sweep.
 
-Set `instanceGarbageCollection.disabled: true` to pause the sweep during
+Two things this does not cover. It protects servers created from this version
+onward; servers predating it carry no UID and are still matched on name alone, so
+until a fleet has fully rolled, distinct names remain the thing to get right.
+And the UID identifies the *control plane*, not the servers: rebuilding a cluster
+from scratch mints a new `kube-system` UID, after which the previous
+incarnation's servers are refused forever — never reclaimed, still billing. The
+`skipped_foreign_cluster` counter is the signal for both. Recovering from a
+rebuild means relabelling those servers with the new UID
+(`hcloud server add-label <server> karpenter.sh/cluster-uid=<uid>`, where `<uid>`
+is `kubectl get ns kube-system -o jsonpath='{.metadata.uid}'`) or deleting them
+by hand.
+
+> **Upgrading an existing cluster.** This version adds a controller that
+> **deletes Hetzner servers**. On first start it reclaims every server in the
+> project that carries this cluster's labels and has no NodeClaim — which is the
+> point, but on a fleet nobody has audited it is worth seeing first.
+>
+> Set `instanceGarbageCollection.mode: observe` to run every check and report
+> what *would* be reclaimed without deleting anything. Watch
+> `karpenter_hetzner_orphaned_server_gc_total{result="would_reap"}` and the
+> `WouldGarbageCollect` events on the affected Nodes, satisfy yourself the list
+> is right, then switch to `enabled`. Reclamations are recorded as
+> `GarbageCollected` events on the Node, so `kubectl describe node` explains a
+> server that disappeared.
+
+Set `instanceGarbageCollection.mode: disabled` to pause the sweep during
 maintenance that removes NodeClaims wholesale (reinstalling the CRDs, restoring
 etcd, clearing finalizers by hand), so it does not act on a cluster that only
 looks empty. Provisioning and disruption keep working while it is off.
@@ -224,7 +255,7 @@ comments explaining every field.
 |---------|----------|-------------|
 | `HCLOUD_TOKEN` | yes | Hetzner Cloud API token |
 | `CLUSTER_NAME` | yes | Cluster identifier; scopes managed servers. Must be unique per Hetzner project — two clusters sharing a value will reclaim each other's servers |
-| `DISABLE_INSTANCE_GARBAGE_COLLECTION` | no (unset) | Set to `true` to pause the orphaned-server sweep (chart value: `instanceGarbageCollection.disabled`) |
+| `INSTANCE_GARBAGE_COLLECTION_MODE` | no (`enabled`) | `enabled`, `observe` or `disabled`; an unrecognised value stops the operator starting (chart value: `instanceGarbageCollection.mode`) |
 | `METRICS_PORT` | no (8080) | Prometheus metrics port |
 | `HEALTH_PROBE_PORT` | no (8081) | Health/readiness probe port |
 

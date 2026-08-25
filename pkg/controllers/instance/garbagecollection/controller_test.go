@@ -1,21 +1,31 @@
 package garbagecollection
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/go-logr/zapr"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/instance"
 )
 
@@ -61,7 +71,11 @@ func server(id int64, name string) *hcloud.Server {
 }
 
 func newTestController(kubeClient client.Client, instances InstanceProvider) *Controller {
-	return NewController(kubeClient, instances, testCluster, testClusterUID)
+	c := NewController(kubeClient, instances, testCluster, testClusterUID, ModeEnabled, clocktesting.NewFakeClock(time.Now()))
+	// Tests assert the observation counter, not the startup floor; treat this
+	// process as already having watched a full window.
+	c.startedAt = c.clock.Now().Add(-requiredUnownedSweeps * resyncInterval)
+	return c
 }
 
 // sweep runs one reconcile and fails the test on error.
@@ -122,6 +136,87 @@ func newFakeClient(objs ...client.Object) client.Client {
 		WithStatusSubresource(&karpv1.NodeClaim{}).
 		WithObjects(objs...).
 		Build()
+}
+
+// Observation counts reset when the process does, so a fresh leader could reach
+// the threshold having watched the cluster for only a few minutes. The floor
+// makes a restart delay the reap rather than authorise one on thin evidence --
+// the whole reason grace can safely stay in memory.
+func TestReconcile_FreshProcessWaitsBeforeReaping(t *testing.T) {
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{server(42, "worker-abc")}}
+	clk := clocktesting.NewFakeClock(time.Now())
+	c := NewController(newFakeClient(), instances, testCluster, testClusterUID, ModeEnabled, clk)
+
+	// Enough observations, but this process has only just started.
+	for range requiredUnownedSweeps + 2 {
+		sweep(t, c)
+	}
+	if len(instances.deleted) != 0 {
+		t.Fatalf("a just-started process reaped on its own short history: %v", instances.deleted)
+	}
+
+	// Once it has been watching for a full window, the same evidence suffices.
+	clk.Step(requiredUnownedSweeps * resyncInterval)
+	sweep(t, c)
+	if len(instances.deleted) != 1 {
+		t.Errorf("failed to reap after watching a full window: %v", instances.deleted)
+	}
+}
+
+// Observe mode must change nothing at all -- not the fleet, and not the servers'
+// labels. An operator evaluating this on an unaudited fleet is told it is
+// read-only, so read-only is what it has to be.
+func TestReconcile_ObserveModeReportsAndChangesNothing(t *testing.T) {
+	srv := server(42, "worker-abc")
+	before := len(srv.Labels)
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{srv}}
+	kubeClient := newFakeClient(nodeFor(42, "worker-abc"))
+
+	clk := clocktesting.NewFakeClock(time.Now())
+	c := NewController(kubeClient, instances, testCluster, testClusterUID, ModeObserve, clk)
+	c.startedAt = clk.Now().Add(-requiredUnownedSweeps * resyncInterval)
+
+	reported := orphanGCCount(t, metrics.OrphanWouldReap)
+	for range requiredUnownedSweeps + 1 {
+		sweep(t, c)
+	}
+
+	if len(instances.deleted) != 0 {
+		t.Errorf("observe mode deleted servers: %v", instances.deleted)
+	}
+	if len(srv.Labels) != before {
+		t.Errorf("observe mode mutated server labels: %v", srv.Labels)
+	}
+	node := &corev1.Node{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Name: "worker-abc"}, node); err != nil {
+		t.Errorf("observe mode deleted the Node object: %v", err)
+	}
+	if orphanGCCount(t, metrics.OrphanWouldReap) <= reported {
+		t.Error("observe mode reported nothing; the mode is only useful if it says what it would do")
+	}
+}
+
+// Switching observe -> enabled must not reap on the first sweep. The counters
+// are this process's, so a new controller starts from zero and re-earns the
+// window; nothing observed during evaluation is banked against the fleet.
+func TestReconcile_ObserveThenEnabledDoesNotReapInstantly(t *testing.T) {
+	srv := server(42, "worker-abc")
+	instances := &fakeInstanceProvider{servers: []*hcloud.Server{srv}}
+	kubeClient := newFakeClient()
+
+	clk := clocktesting.NewFakeClock(time.Now())
+	observe := NewController(kubeClient, instances, testCluster, testClusterUID, ModeObserve, clk)
+	observe.startedAt = clk.Now().Add(-72 * time.Hour)
+	for range 20 {
+		sweep(t, observe)
+	}
+
+	// The operator flips the mode; the pod restarts with a new controller.
+	enabled := NewController(kubeClient, instances, testCluster, testClusterUID, ModeEnabled, clk)
+	sweep(t, enabled)
+	if len(instances.deleted) != 0 {
+		t.Errorf("switching observe->enabled reaped on the first sweep: %v", instances.deleted)
+	}
 }
 
 // A server whose NodeClaim no longer exists is billing with no owner. Nothing in
@@ -257,26 +352,70 @@ func TestReconcile_IgnoresServerOfAnotherClusterWithTheSameName(t *testing.T) {
 }
 
 // Silently declining to touch the other cluster's servers is safe but useless:
-// a name collision would look exactly like a cluster with no orphans. Say so --
-// once per colliding cluster, not once per sweep, or it becomes log noise that
-// nobody reads.
-func TestReconcile_RecordsAForeignClusterSharingOurNameOnce(t *testing.T) {
+// a name collision would look exactly like a cluster with no orphans.
+//
+// The log says so once per colliding cluster -- once per sweep would be noise
+// nobody reads. That is also why it cannot be the only signal: after a pod
+// restart the line has already scrolled away, so the metric has to fire every
+// sweep. Assert the log and the counter, not the bookkeeping map, or removing
+// either report would leave every test green.
+func TestReconcile_ReportsAForeignClusterSharingOurName(t *testing.T) {
 	const foreignUID = "6e5f8dfb-e54b-41ee-8fb3-89a48a42231f"
+	const sweeps = 4
 	foreign := server(42, "worker-abc")
 	foreign.Labels[apiv1.ServerLabelClusterUID] = foreignUID
 	instances := &fakeInstanceProvider{servers: []*hcloud.Server{foreign}}
 
+	var buf bytes.Buffer
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.AddSync(&buf), zapcore.DebugLevel)
+	ctx := logf.IntoContext(context.Background(), zapr.NewLogger(zap.New(core)))
+
 	c := newTestController(newFakeClient(), instances)
-	for range 4 {
-		sweep(t, c)
+	before := skippedForeignCount(t)
+	for range sweeps {
+		if _, err := c.Reconcile(ctx); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 
-	if !c.reportedForeignUIDs[foreignUID] {
-		t.Error("did not record the colliding cluster")
+	if got := bytes.Count(buf.Bytes(), []byte(foreignUID)); got != 1 {
+		t.Errorf("logged the colliding cluster %d times over %d sweeps, want 1; got %s",
+			got, sweeps, buf.String())
 	}
-	if len(c.reportedForeignUIDs) != 1 {
-		t.Errorf("expected exactly one recorded collision, got %d", len(c.reportedForeignUIDs))
+	if got := skippedForeignCount(t) - before; got != sweeps {
+		t.Errorf("counter rose by %v over %d sweeps, want one per sweep", got, sweeps)
 	}
+}
+
+// skippedForeignCount reads the running total of servers refused for carrying
+// another cluster's UID.
+func skippedForeignCount(t *testing.T) float64 {
+	t.Helper()
+	return orphanGCCount(t, metrics.OrphanSkippedForeignCluster)
+}
+
+// orphanGCCount reads the running total of one sweep outcome.
+func orphanGCCount(t *testing.T, result string) float64 {
+	t.Helper()
+	mfs, err := crmetrics.Registry.(prometheus.Gatherer).Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "karpenter_hetzner_orphaned_server_gc_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "result" && l.GetValue() == result {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // A server carrying our own UID is ours, name collision or not.

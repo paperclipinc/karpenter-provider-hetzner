@@ -43,8 +43,12 @@ type Provider struct {
 
 	// clusterUID identifies this cluster independently of its operator-chosen
 	// name, so two clusters sharing a CLUSTER_NAME in one Hetzner project can
-	// still tell their servers apart. Empty disables the check, which is the
-	// pre-existing behaviour.
+	// still tell their servers apart.
+	//
+	// Empty does not mean "no check": creates then stamp no UID, but adoption
+	// still refuses every server that carries one, because a UID that is present
+	// and different is the refusal rule. Only the test constructors leave it
+	// empty; production reads it at startup and refuses to run without it.
 	clusterUID string
 }
 
@@ -144,7 +148,7 @@ func (p *Provider) Create(ctx context.Context, opts CreateOpts) (*hcloud.Server,
 // create is the internal implementation of Create, instrumented by Create().
 func (p *Provider) create(ctx context.Context, opts CreateOpts) (*hcloud.Server, error) {
 	log := logf.FromContext(ctx)
-	labels := make(map[string]string, len(opts.Labels)+3)
+	labels := make(map[string]string, len(opts.Labels)+4)
 	for k, v := range opts.Labels {
 		labels[k] = v
 	}
@@ -328,18 +332,27 @@ func (p *Provider) adoptOrphan(ctx context.Context, opts CreateOpts, createErr e
 		if s.Name != opts.Name {
 			continue
 		}
-		if s.Labels[apiv1.ServerLabelManagedBy] != apiv1.ServerValueManagedBy {
-			continue
-		}
-		if s.Labels[apiv1.ServerLabelCluster] != p.clusterName {
-			continue
-		}
 		// The name label alone is not proof of ownership: CLUSTER_NAME is
 		// operator-supplied and not unique. Adoption hands a live machine to
-		// Karpenter, which will eventually terminate it, so taking one belonging
-		// to a same-named cluster would destroy their node. A missing UID predates
-		// the label and is treated as ours.
-		if uid := s.Labels[apiv1.ServerLabelClusterUID]; uid != "" && uid != p.clusterUID {
+		// Karpenter, which will eventually terminate it, so taking one belonging to
+		// a same-named cluster would destroy their node. Shared with the orphan
+		// sweep, which deletes on the same answer.
+		if !apiv1.OwnedByCluster(s.Labels, p.clusterName, p.clusterUID) {
+			// Refusing a server that is ours-by-name but not ours-by-UID needs its
+			// own signal. Folded into the generic "declined" below it would carry the
+			// wrong remedy: an ordinary decline clears once the NodeClaim expires and
+			// the sweep reclaims the machine, but the sweep refuses this server for
+			// the same reason adoption did, so nothing ever reclaims it.
+			if s.Labels[apiv1.ServerLabelManagedBy] == apiv1.ServerValueManagedBy &&
+				s.Labels[apiv1.ServerLabelCluster] == p.clusterName {
+				log.Info("refusing to adopt a server stamped with a different cluster UID; "+
+					"either two clusters share a CLUSTER_NAME in one Hetzner project, or this "+
+					"cluster's control plane was rebuilt and this server predates it",
+					"name", s.Name, "ourClusterUID", p.clusterUID,
+					"theirClusterUID", s.Labels[apiv1.ServerLabelClusterUID])
+				metrics.RecordServerAdopt(metrics.AdoptForeignCluster)
+				return nil
+			}
 			continue
 		}
 		// Only a server this same NodeClaim created is evidence of a lost create.

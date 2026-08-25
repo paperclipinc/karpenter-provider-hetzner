@@ -516,11 +516,11 @@ func uniquenessErr() error {
 const testClusterUID = "34f25cbf-c7b5-49d1-833b-103bff8a34ad"
 
 // providerWithUID is the production shape: a cluster name plus the UID that
-// makes ownership unambiguous when two clusters share a name.
+// makes ownership unambiguous when two clusters share a name. It goes through
+// the production constructor rather than assigning the field, so anything that
+// construction derives from the UID applies here too.
 func providerWithUID(client ServerClient) *Provider {
-	p := NewProvider(client, "test-cluster")
-	p.clusterUID = testClusterUID
-	return p
+	return NewProviderWithPlacementGroups(client, nil, "test-cluster", testClusterUID, nil)
 }
 
 // Every server this installation creates must carry the cluster UID, or a
@@ -546,9 +546,8 @@ func TestCreate_UniquenessErrorRefusesForeignClusterUID(t *testing.T) {
 	client.servers[42] = s
 	client.createErr = uniquenessErr()
 
-	if _, err := providerWithUID(client).Create(context.Background(), adoptOpts()); err == nil {
-		t.Fatal("adopted a server belonging to a same-named other cluster")
-	}
+	_, err := providerWithUID(client).Create(context.Background(), adoptOpts())
+	assertRefusedAdoption(t, err, "adopted a server belonging to a same-named other cluster")
 }
 
 func TestCreate_AdoptsServerWithMatchingClusterUID(t *testing.T) {

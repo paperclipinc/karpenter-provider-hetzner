@@ -22,6 +22,8 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/clock"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -61,6 +63,26 @@ type Controller struct {
 	instances   InstanceProvider
 	clusterName string
 	clusterUID  string
+	clock       clock.Clock
+
+	// mode selects whether the sweep reclaims or only reports.
+	mode Mode
+
+	// startedAt is when this process's sweeps began. Grace is counted in
+	// consecutive observations, which a restart or a leader handover resets to
+	// zero -- and the instability that strands servers is exactly what causes
+	// those. Without a floor, a fresh process could reap on its third sweep
+	// having seen the cluster for six minutes; with one, it must have been
+	// watching for a full grace window first.
+	//
+	// This is the piece that makes in-process counting safe rather than merely
+	// simple. It converts operator instability into DELAYED reaping instead of
+	// either never reaping (no floor, counters forever reset) or reaping on
+	// stale evidence (a durable marker written by a process that is gone).
+	startedAt time.Time
+
+	// recorder publishes reclamations onto the Node. Nil outside the manager.
+	recorder events.EventRecorder
 
 	// unownedSweeps counts, per provider ID, how many consecutive sweeps have
 	// seen the server without an owner. Entries vanish as soon as a server is
@@ -74,48 +96,84 @@ type Controller struct {
 	reportedForeignUIDs map[string]bool
 }
 
-func NewController(kubeClient client.Client, instances InstanceProvider, clusterName, clusterUID string) *Controller {
+// Mode selects how the sweep behaves. It is the config's own type rather than a
+// bool so that adding a mode cannot silently fall through to the deleting
+// branch: the controller decides what each mode means, in one place.
+type Mode string
+
+const (
+	// ModeEnabled reclaims orphaned servers.
+	ModeEnabled Mode = "enabled"
+	// ModeObserve runs every check and reports what it would reclaim, deleting
+	// nothing and writing nothing outside the cluster.
+	ModeObserve Mode = "observe"
+)
+
+func NewController(
+	kubeClient client.Client,
+	instances InstanceProvider,
+	clusterName, clusterUID string,
+	mode Mode,
+	clk clock.Clock,
+) *Controller {
 	return &Controller{
 		kubeClient:          kubeClient,
 		instances:           instances,
 		clusterName:         clusterName,
 		clusterUID:          clusterUID,
+		mode:                mode,
+		clock:               clk,
+		startedAt:           clk.Now(),
 		unownedSweeps:       map[string]int{},
 		reportedForeignUIDs: map[string]bool{},
 	}
 }
 
-// managedByThisCluster reports whether this installation may act on a server.
+// watchedLongEnough reports whether this process has been sweeping for a full
+// grace window. Until it has, its observation counts describe too short a
+// history to justify deleting anything.
+func (c *Controller) watchedLongEnough() bool {
+	return c.clock.Since(c.startedAt) >= requiredUnownedSweeps*resyncInterval
+}
+
+// managedByThisCluster reports whether this installation may act on a server,
+// reporting the one kind of refusal an operator needs to hear about.
 //
-// The cluster UID is the authoritative test. CLUSTER_NAME is operator-supplied
-// and nothing enforces uniqueness, so two clusters sharing one in a single
-// Hetzner project would each read the other's servers as unclaimed. A server
-// whose UID is present and different belongs to another cluster and is never
-// touched; a missing UID predates the label and is treated as ours, because
-// refusing those would strand every server created before this change.
+// The ownership rule itself lives in apiv1.OwnedByCluster, shared with the
+// adoption path so the two destructive callers cannot drift apart.
 func (c *Controller) managedByThisCluster(ctx context.Context, s *hcloud.Server) bool {
-	if s.Labels[apiv1.ServerLabelManagedBy] != apiv1.ServerValueManagedBy {
-		return false
+	if apiv1.OwnedByCluster(s.Labels, c.clusterName, c.clusterUID) {
+		return true
 	}
-	if s.Labels[apiv1.ServerLabelCluster] != c.clusterName {
-		return false
+	// A server that carries our management labels and our cluster name but a
+	// different UID was refused on the UID alone -- the one refusal that means
+	// something is misconfigured rather than simply not ours.
+	if s.Labels[apiv1.ServerLabelManagedBy] == apiv1.ServerValueManagedBy &&
+		s.Labels[apiv1.ServerLabelCluster] == c.clusterName {
+		c.reportForeignCluster(ctx, s.Labels[apiv1.ServerLabelClusterUID])
 	}
-	if uid := s.Labels[apiv1.ServerLabelClusterUID]; uid != "" && uid != c.clusterUID {
-		// Declining is the safe half; saying so is the useful half. Left silent, a
-		// name collision is indistinguishable from a cluster that simply has no
-		// orphans -- and the operator would never learn that two clusters are
-		// sharing a CLUSTER_NAME until something else went wrong. Report each
-		// colliding cluster once rather than every sweep, so it stays readable.
-		if !c.reportedForeignUIDs[uid] {
-			c.reportedForeignUIDs[uid] = true
-			logf.FromContext(ctx).Info(
-				"found servers labelled for this cluster's name but belonging to a different cluster; "+
-					"two clusters appear to share a CLUSTER_NAME in one Hetzner project",
-				"clusterName", c.clusterName, "ourClusterUID", c.clusterUID, "theirClusterUID", uid)
-		}
-		return false
+	return false
+}
+
+// reportForeignCluster records a server refused because its cluster UID is not
+// ours.
+//
+// Declining is the safe half; saying so is the useful half. Left silent, this is
+// indistinguishable from a cluster that simply has no orphans. The metric fires
+// every sweep because it is the only alertable evidence -- the log deliberately
+// does not repeat, so after a pod restart it is the sole remaining signal. The
+// log fires once per foreign cluster, where it stays readable.
+func (c *Controller) reportForeignCluster(ctx context.Context, uid string) {
+	metrics.RecordOrphanGC(metrics.OrphanSkippedForeignCluster)
+	if c.reportedForeignUIDs[uid] {
+		return
 	}
-	return true
+	c.reportedForeignUIDs[uid] = true
+	logf.FromContext(ctx).Info(
+		"refusing servers labelled for this cluster's name but stamped with a different cluster UID; "+
+			"either two clusters share a CLUSTER_NAME in one Hetzner project, or this cluster's "+
+			"control plane was rebuilt and these servers predate it",
+		"clusterName", c.clusterName, "ourClusterUID", c.clusterUID, "theirClusterUID", uid)
 }
 
 func (c *Controller) Name() string { return "instance.garbagecollection" }
@@ -260,6 +318,29 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 			continue
 		}
 
+		// Counters reset when this process started, so a fresh leader could reach
+		// the threshold having watched the cluster for only a few minutes. Require
+		// that it has been sweeping for a full window first: after a restart or a
+		// handover the reap is delayed, never skipped and never premature.
+		if !c.watchedLongEnough() {
+			continue
+		}
+
+		// Observe mode stops here, before anything is deleted and before anything
+		// outside the cluster is written. That boundary is the point: an operator
+		// evaluating this on an unaudited fleet is told it changes nothing, and
+		// nothing is what it must change -- including labels on their servers.
+		if c.mode == ModeObserve {
+			log.Info("would garbage collect orphaned server (observe mode, nothing deleted)",
+				"name", s.Name, "id", s.ID, "providerID", providerID)
+			metrics.RecordOrphanGC(metrics.OrphanWouldReap)
+			c.recordOnNode(node, corev1.EventTypeNormal, "WouldGarbageCollect",
+				"Hetzner server %s (%s) has no NodeClaim and would be reclaimed; "+
+					"instance garbage collection is in observe mode, so nothing was deleted",
+				s.Name, providerID)
+			continue
+		}
+
 		// A NodeClaimNotFoundError means the server is already gone, which is the
 		// outcome we wanted; fall through and clean up its Node object.
 		if err := karpcp.IgnoreNodeClaimNotFoundError(c.instances.Delete(ctx, providerID)); err != nil {
@@ -286,6 +367,13 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 		log.Info("garbage collected orphaned server",
 			"name", s.Name, "id", s.ID, "providerID", providerID, "unownedSweeps", sweeps)
 		metrics.RecordOrphanGC(metrics.OrphanReaped)
+		// Normal, not Warning: reclaiming an orphan is this controller working, not
+		// a fault. A cluster alerting on Warning events against Nodes would page
+		// every time the sweep does its job.
+		c.recordOnNode(node, corev1.EventTypeNormal, "GarbageCollected",
+			"Hetzner server %s (%s) was reclaimed after %d consecutive sweeps with no NodeClaim; "+
+				"this Node is being removed with it",
+			s.Name, providerID, sweeps)
 
 		if node != nil {
 			// The index was read before a run of blocking hcloud calls, so this Node
@@ -381,8 +469,23 @@ func (c *Controller) buildNodeIndex(ctx context.Context) (nodeIndex, error) {
 	return idx, nil
 }
 
+// recordOnNode publishes an event against the Node a server backed.
+//
+// Most orphans have no Node at all -- the crash-window case this package exists
+// for never registered one -- so this is a best-effort supplement to the log and
+// the metric, not the primary signal. The event also outlives the Node it hangs
+// off only for the cluster's event TTL, and `kubectl describe node` cannot show
+// it once the Node is deleted; `kubectl get events` can.
+func (c *Controller) recordOnNode(node *corev1.Node, eventType, reason, note string, args ...any) {
+	if c.recorder == nil || node == nil {
+		return
+	}
+	c.recorder.Eventf(node, nil, eventType, reason, reason, note, args...)
+}
+
 // Register wires the controller into the manager.
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
+	c.recorder = m.GetEventRecorder(c.Name())
 	return controllerruntime.NewControllerManagedBy(m).
 		Named(c.Name()).
 		WatchesRawSource(singleton.Source()).

@@ -32,4 +32,4 @@ annotations:
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
     - kind: added
-      description: "Reclaim Hetzner servers Karpenter no longer has a NodeClaim for, which would otherwise run and bill unowned; pause the sweep with instanceGarbageCollection.disabled during maintenance that removes NodeClaims wholesale"
+      description: "Reclaim Hetzner servers Karpenter no longer has a NodeClaim for, which would otherwise run and bill unowned; set instanceGarbageCollection.mode to observe to preview it, or disabled to pause it during maintenance that removes NodeClaims wholesale"

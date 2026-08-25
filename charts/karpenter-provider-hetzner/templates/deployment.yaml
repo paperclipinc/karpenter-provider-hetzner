@@ -68,10 +68,17 @@ spec:
                   key: {{ .Values.auth.secretRef.key }}
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
-            {{- if .Values.instanceGarbageCollection.disabled }}
-            - name: DISABLE_INSTANCE_GARBAGE_COLLECTION
-              value: "true"
+            {{- if hasKey .Values.instanceGarbageCollection "disabled" }}
+              {{- fail "instanceGarbageCollection.disabled has been replaced by instanceGarbageCollection.mode (enabled|observe|disabled). Your existing value is being ignored, which would leave the orphaned-server sweep RUNNING. Set mode explicitly and remove the disabled key." }}
             {{- end }}
+            # Emitted unconditionally rather than through `with`, which skips
+            # falsy values: `mode: false` -- the natural typo when migrating from
+            # the boolean this replaced -- would omit the variable, the operator
+            # would default to enabled, and a value meant to stop the sweep would
+            # start it. Passed through so an invalid value reaches parseGCMode,
+            # which refuses to start.
+            - name: INSTANCE_GARBAGE_COLLECTION_MODE
+              value: {{ .Values.instanceGarbageCollection.mode | quote }}
             - name: METRICS_PORT
               value: {{ .Values.metrics.port | quote }}
             - name: HEALTH_PROBE_PORT

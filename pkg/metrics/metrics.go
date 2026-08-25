@@ -3,10 +3,8 @@
 //
 // All metrics are registered once in an init() against controller-runtime's
 // shared Registry so they coexist safely with karpenter-core metrics.
-// Callers import this package for its side-effects and then invoke the helper
-// functions (RecordServerCreate, RecordServerDelete, RecordDrift,
-// RecordCacheHit, RecordCacheMiss, RecordOrphanGC, RecordServerAdopt) to
-// instrument hot paths.
+// Callers import this package for its side-effects and then invoke the exported
+// helper functions to instrument hot paths.
 package metrics
 
 import (
@@ -112,11 +110,24 @@ const (
 	OrphanSkippedAmbiguous = "skipped_ambiguous_node"
 	OrphanSkippedReady     = "skipped_registered_ready"
 
+	// OrphanSkippedForeignCluster marks a server carrying another cluster's UID
+	// under our CLUSTER_NAME. Declining is correct, but the decline is the only
+	// evidence that two clusters share a name in one Hetzner project -- and the
+	// log that reports it fires once per process, so after any restart the
+	// misconfiguration is invisible. This is what stays alertable.
+	OrphanSkippedForeignCluster = "skipped_foreign_cluster"
+
 	// OrphanSweepFailed marks a sweep that could not run to completion. The sweep
 	// swallows list failures to protect its cadence, which also hides them from
 	// controller_runtime_reconcile_errors_total -- so without this a permanently
 	// broken sweep is indistinguishable from a cluster that simply has no orphans.
 	OrphanSweepFailed = "sweep_failed"
+
+	// OrphanWouldReap marks a server the sweep would have reclaimed had it not
+	// been running in observe mode. It is what makes the mode useful: an operator
+	// can watch this climb, satisfy themselves it names the right machines, and
+	// only then switch to enabled.
+	OrphanWouldReap = "would_reap"
 )
 
 // RecordOrphanGC records one orphaned-server sweep outcome.
@@ -129,6 +140,13 @@ const (
 	AdoptAdopted  = "adopted"
 	AdoptDeclined = "declined"
 	AdoptError    = "error"
+
+	// AdoptForeignCluster marks a collision with a server carrying another
+	// cluster's UID. It is separated from "declined" because the remedy differs:
+	// an ordinary decline resolves itself once the NodeClaim expires and the sweep
+	// reclaims the machine, whereas this server is not ours and will never be
+	// reclaimed -- waiting for the sweep is exactly the wrong response.
+	AdoptForeignCluster = "foreign_cluster"
 )
 
 // RecordServerAdopt records the outcome of one attempt to recover a server by
