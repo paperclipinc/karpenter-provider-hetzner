@@ -134,7 +134,7 @@ func buildCP(t *testing.T, nc *apiv1.HCloudNodeClass, server *hcloud.Server) (*c
 
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
-		instancetype.NewProvider(stc),
+		instancetype.NewProvider(stc, 0),
 		imagefamily.NewProvider(imgc))
 
 	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim"}}
@@ -207,7 +207,7 @@ func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.S
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: types}
 	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
-	typeProvider := instancetype.NewProvider(stc)
+	typeProvider := instancetype.NewProvider(stc, 0)
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		typeProvider,
@@ -308,7 +308,7 @@ func TestCreate_InsufficientCapacityMarksUnavailable(t *testing.T) {
 		t.Fatal("expected error on capacity failure")
 	}
 	// The offering for (cx22, nbg1) should now be marked unavailable.
-	its, lerr := typeProvider.List(context.Background(), []string{"nbg1"})
+	its, lerr := typeProvider.List(context.Background(), &apiv1.HCloudNodeClass{Spec: apiv1.HCloudNodeClassSpec{Locations: []string{"nbg1"}}})
 	if lerr != nil {
 		t.Fatal(lerr)
 	}
@@ -460,7 +460,7 @@ func TestCreate_UserDataFromSecret(t *testing.T) {
 	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
-		instancetype.NewProvider(stc),
+		instancetype.NewProvider(stc, 0),
 		imagefamily.NewProvider(imgc))
 
 	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
@@ -485,7 +485,7 @@ func TestCreate_UserDataInlineWhenNoRef(t *testing.T) {
 	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
-		instancetype.NewProvider(stc),
+		instancetype.NewProvider(stc, 0),
 		imagefamily.NewProvider(imgc))
 
 	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
@@ -519,7 +519,7 @@ func TestCreate_UserDataSecretKeyMissing(t *testing.T) {
 	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
-		instancetype.NewProvider(stc),
+		instancetype.NewProvider(stc, 0),
 		imagefamily.NewProvider(imgc))
 
 	_, err := cp.Create(context.Background(), createNodeClaim())
@@ -546,7 +546,7 @@ func TestCreate_UserDataSecretMissing(t *testing.T) {
 	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
-		instancetype.NewProvider(stc),
+		instancetype.NewProvider(stc, 0),
 		imagefamily.NewProvider(imgc))
 
 	_, err := cp.Create(context.Background(), createNodeClaim())

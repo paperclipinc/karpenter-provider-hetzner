@@ -52,6 +52,16 @@ args: []
 # Required: scopes managed servers so multiple clusters can share one Hetzner project.
 clusterName: ""
 
+# Fraction of a server type's advertised memory assumed to be invisible to the
+# guest. Hetzner advertises what the VM is allocated; the kernel and firmware
+# take a cut that varies with machine size, so this is an estimate, used only
+# until a node of that type registers and reports its real capacity.
+#
+# Raise it if nodes still register smaller than Karpenter expects. Lower it only
+# with measurements in hand: too low tells Karpenter a server is bigger than it
+# is, which strands pods on nodes that cannot hold them.
+vmMemoryOverheadPercent: 0.075
+
 metrics:
   port: 8080
 healthProbe:

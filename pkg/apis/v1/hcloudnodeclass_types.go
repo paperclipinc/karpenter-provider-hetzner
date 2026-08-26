@@ -68,6 +68,48 @@ type HCloudNodeClassSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	EnablePublicIPv6 *bool `json:"enablePublicIPv6,omitempty"`
+
+	// Kubelet declares the reservations this node class's bootstrap applies to
+	// the kubelet, so Karpenter can subtract them when computing how much of a
+	// server a pod can actually use.
+	//
+	// This provider does not render the bootstrap: userData is supplied by the
+	// operator, so these values describe what that userData does rather than
+	// configure it. They must be kept in agreement with it. Declaring less than
+	// the bootstrap reserves makes Karpenter believe a server is larger than it
+	// is, which strands pods on nodes too small for them.
+	// +optional
+	Kubelet *KubeletConfiguration `json:"kubelet,omitempty"`
+}
+
+// KubeletConfiguration mirrors the subset of kubelet settings that change how
+// much of a node is schedulable. Only the reservation knobs are modelled;
+// anything that does not move allocatable is deliberately absent.
+type KubeletConfiguration struct {
+	// SystemReserved is resources reserved for OS system daemons, matching the
+	// kubelet's --system-reserved.
+	// +kubebuilder:validation:XValidation:message="valid keys for systemReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
+	// +kubebuilder:validation:XValidation:message="systemReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +optional
+	SystemReserved map[string]string `json:"systemReserved,omitempty"`
+
+	// KubeReserved is resources reserved for Kubernetes system daemons, matching
+	// the kubelet's --kube-reserved.
+	// +kubebuilder:validation:XValidation:message="valid keys for kubeReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
+	// +kubebuilder:validation:XValidation:message="kubeReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +optional
+	KubeReserved map[string]string `json:"kubeReserved,omitempty"`
+
+	// EvictionHard is the kubelet's hard eviction thresholds. Memory held back
+	// for eviction is memory a pod cannot have, so it comes out of allocatable
+	// the same way a reservation does. Values are either a quantity ("400Mi") or
+	// a percentage of capacity ("10%").
+	//
+	// Soft eviction is deliberately not modelled: it is a warning threshold that
+	// does not reduce allocatable.
+	// +kubebuilder:validation:XValidation:message="valid keys for evictionHard are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +optional
+	EvictionHard map[string]string `json:"evictionHard,omitempty"`
 }
 
 // UserDataSecretReference points at a Secret key holding the server userData.
