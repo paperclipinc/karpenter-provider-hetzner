@@ -2,8 +2,8 @@ apiVersion: v2
 name: karpenter-provider-hetzner
 description: Karpenter cloud provider for Hetzner Cloud
 type: application
-version: 2.1.0
-appVersion: "2.1.0"
+version: 2.1.1
+appVersion: "2.1.1"
 # home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
 home: https://paperclip.inc/karpenter-hetzner
@@ -29,9 +29,11 @@ annotations:
     - name: k3s bootstrap guide
       url: https://github.com/paperclipinc/karpenter-provider-hetzner/blob/main/docs/k3s-bootstrap.md
   artifacthub.io/category: integration-delivery
-  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/containsSecurityUpdates: "true"
   artifacthub.io/changes: |
     - kind: fixed
-      description: "Pods bound to an hcloud CSI volume can now trigger provisioning: csi.hetzner.cloud/location is aliased to topology.kubernetes.io/zone"
-    - kind: added
-      description: "Expose nodeSelector, affinity, tolerations, topologySpreadConstraints, imagePullSecrets, priorityClassName, command, args and an optional PodDisruptionBudget (minAvailable or maxUnavailable) on the Deployment via chart values"
+      description: "RBAC grants event create/patch on events.k8s.io alongside the legacy core group, so the controller can emit events through the modern recorder"
+    - kind: security
+      description: "Operator image rebuilt with Go 1.26.7, clearing five stdlib vulnerabilities (GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, GO-2026-5026)"
+    - kind: changed
+      description: "Dependency bumps: sigs.k8s.io/karpenter 1.14.1, hcloud-go 2.47.0, k8s.io libraries 0.36.4"
