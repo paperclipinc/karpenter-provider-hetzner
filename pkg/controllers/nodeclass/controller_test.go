@@ -3,6 +3,7 @@ package nodeclass
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -34,10 +35,16 @@ func (f fakeSSHKeys) GetByID(_ context.Context, _ int64) (*hcloud.SSHKey, *hclou
 	return f.key, nil, nil
 }
 
+// fakeImages answers every architecture, echoing the requested one back on the image
+// exactly as hcloud does (it filters server-side and always populates Architecture).
 type fakeImages struct{ img *hcloud.Image }
 
-func (f fakeImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
-	return []*hcloud.Image{f.img}, nil
+func (f fakeImages) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	img := *f.img
+	if len(opts.Architecture) > 0 {
+		img.Architecture = opts.Architecture[0]
+	}
+	return []*hcloud.Image{&img}, nil
 }
 
 type emptyImages struct{}
@@ -53,7 +60,9 @@ type amd64OnlyImages struct{ img *hcloud.Image }
 func (f amd64OnlyImages) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
 	for _, a := range opts.Architecture {
 		if a == hcloud.ArchitectureX86 {
-			return []*hcloud.Image{f.img}, nil
+			img := *f.img
+			img.Architecture = hcloud.ArchitectureX86
+			return []*hcloud.Image{&img}, nil
 		}
 	}
 	return nil, nil
@@ -354,7 +363,9 @@ type x86OKArmErrors struct{ img *hcloud.Image }
 func (f x86OKArmErrors) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
 	for _, a := range opts.Architecture {
 		if a == hcloud.ArchitectureX86 {
-			return []*hcloud.Image{f.img}, nil
+			img := *f.img
+			img.Architecture = hcloud.ArchitectureX86
+			return []*hcloud.Image{&img}, nil
 		}
 	}
 	return nil, errors.New("server error (503)")
@@ -422,5 +433,162 @@ func TestReconcile_CarriesForwardArchOnTransientError(t *testing.T) {
 	}
 	if !haveArm {
 		t.Errorf("arm entry dropped on an API error instead of carried forward: %+v", got.Status.ResolvedImages)
+	}
+}
+
+// wrongArchImages returns an x86 image regardless of the architecture requested,
+// simulating the catalogue answering with something the server-side filter should have
+// excluded. The provider does not re-filter client-side, so nothing else catches it.
+type wrongArchImages struct{}
+
+func (wrongArchImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return []*hcloud.Image{{ID: 77, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}, nil
+}
+
+// TestReconcile_RejectsWrongArchImage verifies that an image whose architecture does not
+// match the one requested is never recorded in status. Create launches the ID from
+// status and synthesises the architecture from the request, so an unverified entry here
+// is launched unchecked and boots a node that fails workloads with exec format error.
+func TestReconcile_RejectsWrongArchImage(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(wrongArchImages{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	for _, ri := range got.Status.ResolvedImages {
+		if ri.Architecture == string(hcloud.ArchitectureARM) {
+			t.Errorf("recorded an x86 image under arm: %+v", got.Status.ResolvedImages)
+		}
+	}
+}
+
+// TestReconcile_DoesNotCarryForwardAcrossSpecChange verifies that image IDs resolved
+// under an older spec are not carried forward after the spec changes. Carry-forward
+// exists to survive an API blip, and is only sound while the question is unchanged: if
+// the operator repins imageSelector and the new lookup fails with anything that is not a
+// definitive miss, reusing the pre-edit IDs launches the OLD image while reporting the
+// NodeClass green -- and a permanent failure (a 403 from a rotated token, a selector the
+// API rejects) makes that state permanent rather than blip-bounded.
+func TestReconcile_DoesNotCarryForwardAcrossSpecChange(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	// Resolve under generation 1, exactly as a successful pass would: SetTrue stamps the
+	// ImagesReady condition's observedGeneration, which is where the generation of the
+	// recorded IDs is read back from.
+	nc.Generation = 1
+	nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{{Architecture: "x86", ImageID: 42}}
+	nc.Generation = 2 // ...then the operator edits the spec, so those IDs answer the old one
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(unreadableImages{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	for _, ri := range got.Status.ResolvedImages {
+		if ri.ImageID == 42 {
+			t.Errorf("carried a pre-edit image ID forward across a spec change: %+v", got.Status.ResolvedImages)
+		}
+	}
+	if got.StatusConditions().Get(apiv1.ConditionTypeImagesReady).IsTrue() {
+		t.Error("ImagesReady is green while no image was resolved for the current spec")
+	}
+}
+
+// definitiveX86TransientArm reports x86 as definitively absent (an empty but readable
+// catalogue) while the arm lookup fails with an API error -- the shape of an image
+// deleted from the project during an unrelated hcloud blip.
+type definitiveX86TransientArm struct{}
+
+func (definitiveX86TransientArm) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	for _, a := range opts.Architecture {
+		if a == hcloud.ArchitectureX86 {
+			return nil, nil // readable, and holds nothing: definitive
+		}
+	}
+	return nil, errors.New("server error (503)")
+}
+
+// TestReconcile_ReportsDefinitiveErrorAlongsideTransient verifies that an architecture
+// proven absent is both reported and dropped from status, even when a different
+// architecture failed transiently in the same pass. The transient branch keeps state on
+// purpose, but anything left in status at that point can only belong to a DEFINITIVELY
+// failed architecture -- a transient one is carried forward into the resolved set -- so
+// leaving it there advertises an image the catalogue says is gone, and reporting only
+// the 503 hides the one error the operator can actually act on.
+func TestReconcile_ReportsDefinitiveErrorAlongsideTransient(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Status.ResolvedImages = []apiv1.ResolvedImage{{Architecture: "x86", ImageID: 42}}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(definitiveX86TransientArm{})
+	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	for _, ri := range got.Status.ResolvedImages {
+		if ri.Architecture == "x86" {
+			t.Errorf("kept an x86 entry the catalogue definitively lacks: %+v", got.Status.ResolvedImages)
+		}
+	}
+	cond := got.StatusConditions().Get(apiv1.ConditionTypeImagesReady)
+	if cond == nil {
+		t.Fatal("ImagesReady condition not set")
+	}
+	if !strings.Contains(cond.Message, "no ubuntu image found") {
+		t.Errorf("definitive x86 failure not reported; message only carries the blip: %q", cond.Message)
+	}
+	if !strings.Contains(cond.Message, "503") {
+		t.Errorf("transient arm failure dropped from the message: %q", cond.Message)
+	}
+}
+
+// TestResolvedImagesGeneration_AbsentConditionFailsSafe pins the read path for the
+// carry-forward gate. operatorpkg's ConditionSet constructor initializes any absent
+// dependent condition to Unknown stamped with the CURRENT generation, so reading the
+// generation through nc.StatusConditions() would report a NodeClass that never resolved
+// an image as up to date -- disabling the gate -- and would mutate the object from what
+// reads like a getter. Absent must read as zero so the caller clears rather than carries
+// forward.
+func TestResolvedImagesGeneration_AbsentConditionFailsSafe(t *testing.T) {
+	nc := newNodeClass()
+	nc.Generation = 7
+	nc.Status.Conditions = nil
+
+	if got := resolvedImagesGeneration(nc); got != 0 {
+		t.Errorf("absent ImagesReady read as generation %d, want 0 (gate must clear, not carry forward)", got)
+	}
+	if len(nc.Status.Conditions) != 0 {
+		t.Errorf("reading the generation fabricated %d conditions; it must not mutate the object",
+			len(nc.Status.Conditions))
+	}
+
+	// A condition that IS present reports the generation it was stamped at.
+	nc.Generation = 1
+	nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	nc.Generation = 2
+	if got := resolvedImagesGeneration(nc); got != 1 {
+		t.Errorf("resolvedImagesGeneration = %d, want 1 (the generation the images were resolved under)", got)
 	}
 }

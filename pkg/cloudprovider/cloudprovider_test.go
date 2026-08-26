@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
@@ -235,6 +236,21 @@ func buildCPWithImages(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.
 		typeProvider,
 		imagefamily.NewProvider(imgc))
 	return cp, fsc, typeProvider
+}
+
+// withResolvedImages stamps images onto nc the way a successful reconcile does: entries
+// plus an ImagesReady condition carrying the current metadata.generation.
+//
+// Setting Status.ResolvedImages alone is not equivalent. Consumers gate on the recorded
+// generation matching metadata.generation, and a bare NodeClass has generation 0, so
+// entries with no condition match by 0 == 0 -- a state no real cluster can be in, since
+// generation is >= 1 from creation onward. A test built that way keeps passing even if
+// the gate is broken for every generation an apiserver would actually assign.
+func withResolvedImages(nc *apiv1.HCloudNodeClass, images ...apiv1.ResolvedImage) *apiv1.HCloudNodeClass {
+	nc.Generation = 1
+	nc.Status.ResolvedImages = images
+	nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	return nc
 }
 
 // createNodeClaim returns a NodeClaim with empty requirements (compatible with any type).
@@ -925,9 +941,7 @@ func TestCreate_SkipsArchWithoutResolvedImage(t *testing.T) {
 	cheapArm := armType("cax31", "0.0100")
 	nc := baselineNodeClass()
 	// Exactly what resolveImages records for an x86-only image catalog.
-	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
-		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
-	}
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
 	types := []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")}
 	cp, fsc, _ := buildCPWithTypes(t, nc, types)
 
@@ -954,9 +968,7 @@ func TestCreate_SkipsArchWithoutResolvedImage(t *testing.T) {
 func TestCreate_ReportsMissingImageNotCapacity(t *testing.T) {
 	cheapArm := armType("cax31", "0.0100")
 	nc := baselineNodeClass()
-	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
-		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
-	}
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
 	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
 
 	// An arm64 NodePool on a NodeClass that only resolved an amd64 image.
@@ -998,9 +1010,7 @@ func TestCreate_PrefersCapacityErrorWhenBothBlock(t *testing.T) {
 	cheapArm := armType("cax31", "0.0100")
 	nc := baselineNodeClass()
 	// arm64 has no image; amd64 does, so cx43 reaches the offering check.
-	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
-		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
-	}
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
 	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
 
 	// Both types are offered only in nbg1, so pinning hel1 leaves cx43 with no
@@ -1073,9 +1083,7 @@ func TestCreate_TieBreaksDeterministically(t *testing.T) {
 // mechanism already used for unpriced offerings.
 func TestGetInstanceTypes_MarksImagelessArchUnavailable(t *testing.T) {
 	nc := baselineNodeClass()
-	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
-		{Architecture: string(hcloud.ArchitectureX86), ImageID: 42},
-	}
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
 	types := []*hcloud.ServerType{armType("cax31", "0.0100"), hourlyType("cx43", 8, 16, "0.0260")}
 	cp, _, _ := buildCPWithTypes(t, nc, types)
 
@@ -1121,9 +1129,7 @@ func TestGetInstanceTypes_MarksImagelessArchUnavailable(t *testing.T) {
 // from what the image client would return, so only reading status produces it.
 func TestCreate_LaunchesStatusResolvedImageID(t *testing.T) {
 	nc := baselineNodeClass()
-	nc.Status.ResolvedImages = []apiv1.ResolvedImage{
-		{Architecture: string(hcloud.ArchitectureX86), ImageID: 99},
-	}
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 99})
 	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cx22Type()})
 
 	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
@@ -1153,5 +1159,128 @@ func TestCreate_LiveImageNotFoundIsTerminal(t *testing.T) {
 	}
 	if !karpcp.IsNodeClassNotReadyError(err) {
 		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+}
+
+// unfilteredImages ignores the architecture filter and always answers with an x86 image,
+// standing in for a catalogue that returns something the server-side filter should have
+// excluded. fakeImageClient deliberately honours the filter, so this is the only way to
+// reach the mismatch.
+type unfilteredImages struct{ img *hcloud.Image }
+
+func (u unfilteredImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return []*hcloud.Image{u.img}, nil
+}
+
+// TestCreate_LiveImageWrongArchIsRejected verifies that the live image lookup -- the
+// path taken when status carries no entry for the architecture -- refuses an image whose
+// architecture does not match the one the NodeClaim requires, instead of launching it.
+// Such a node boots and then fails every workload with "exec format error". The check
+// has to live on this path: an entry read from status reports the architecture it was
+// filed under, so comparing it against that same architecture in Create can never fail
+// (the nodeclass controller verifies status entries at write time instead).
+func TestCreate_LiveImageWrongArchIsRejected(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := baselineNodeClass() // no status.resolvedImages: forces the live lookup
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(&fakeServerTypeClient{types: []*hcloud.ServerType{armType("cax31", "0.0100")}}),
+		imagefamily.NewProvider(unfilteredImages{
+			img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86},
+		}))
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("launched an arm64 node from an x86 image")
+	}
+	if fsc.lastOpts.ServerType != nil {
+		t.Errorf("a server was created despite the architecture mismatch: %+v", fsc.lastOpts.ServerType)
+	}
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+}
+
+// selectionSkippedCount reads the current value of
+// karpenter_hetzner_instance_type_selection_skipped_total for one arch/reason pair.
+// Tests compare deltas, since the registry is process-global and other tests launch too.
+func selectionSkippedCount(t *testing.T, arch, reason string) float64 {
+	t.Helper()
+	families, err := crmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gathering metrics: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != "karpenter_hetzner_instance_type_selection_skipped_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["arch"] == arch && labels["reason"] == reason {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// TestCreate_CountsSkippedArchOncePerLaunch verifies that the skipped-selection counter
+// tracks launches, not catalogue size. Incrementing inside the selection loop made a
+// single launch add one per ARM type hcloud publishes, so the rate scaled with the
+// catalogue and could not be compared across clusters or read as "how often are we
+// routing around a missing image" -- which is what docs/talos-bootstrap.md tells
+// operators to alert on.
+func TestCreate_CountsSkippedArchOncePerLaunch(t *testing.T) {
+	nc := baselineNodeClass()
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	// Three ARM types are skipped for the one missing image; the counter must move by 1.
+	types := []*hcloud.ServerType{
+		armType("cax11", "0.0100"), armType("cax21", "0.0110"), armType("cax31", "0.0120"),
+		hourlyType("cx43", 8, 16, "0.0260"),
+	}
+	cp, fsc, _ := buildCPWithTypes(t, nc, types)
+
+	before := selectionSkippedCount(t, string(hcloud.ArchitectureARM), "no_resolved_image")
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Fatalf("expected the launch to fall through to cx43, got %q", got)
+	}
+	if delta := selectionSkippedCount(t, string(hcloud.ArchitectureARM), "no_resolved_image") - before; delta != 1 {
+		t.Errorf("counter moved by %v for one launch that skipped 3 arm types, want 1", delta)
+	}
+}
+
+// TestCreate_IgnoresStaleGenerationResolvedImage verifies that image IDs recorded under
+// an earlier spec generation are not launched. The nodeclass controller clears them the
+// next time it reconciles, but nothing makes core wait for that: its NodeClass readiness
+// gate compares no observedGeneration, so a NodeClass whose imageSelector was just
+// repinned still reads Ready=True -- and stays that way indefinitely if the nodeclass
+// controller is wedged. Reading status unconditionally would boot the pre-edit image
+// while every condition is green; a stale entry must fall back to a live lookup against
+// the current selector, which is what Create did before status was consulted at all.
+func TestCreate_IgnoresStaleGenerationResolvedImage(t *testing.T) {
+	// Resolved under generation 1, exactly as a successful pass would stamp it...
+	nc := withResolvedImages(baselineNodeClass(),
+		apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 99})
+	// ...then the operator edits the spec, so image 99 answers a question no longer asked.
+	nc.Generation = 2
+
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cx22Type()})
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Image == nil {
+		t.Fatal("no image recorded on create")
+	}
+	if got := fsc.lastOpts.Image.ID; got != 42 {
+		t.Errorf("launched image %d, want 42 from a live lookup (99 means the pre-edit status entry won)", got)
 	}
 }

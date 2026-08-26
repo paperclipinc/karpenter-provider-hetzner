@@ -194,6 +194,14 @@ spec:
                   type: object
                 type: array
               resolvedImages:
+                description: |-
+                  ResolvedImages holds one image ID per hcloud architecture, resolved from
+                  Spec.ImageSelector. The generation these answer is not stored alongside them: it is
+                  read back from the ImagesReady condition's observedGeneration, which operatorpkg
+                  stamps on every condition write and which has been part of the shipped CRD since
+                  v1. A dedicated status field would be pruned to zero by any apiserver still serving
+                  the CRD from an earlier release -- Helm never upgrades crds/ -- which would make
+                  the carry-forward below silently inert on exactly the clusters it protects.
                 items:
                   properties:
                     architecture:

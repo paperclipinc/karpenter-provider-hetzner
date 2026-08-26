@@ -111,8 +111,10 @@ imageSelector:
 
 The provider resolves one image per architecture that matches **all** selector
 labels.  Each architecture resolves independently, so a NodeClass stays Ready as
-long as **at least one** does; `ImagesReady=False` means no architecture resolved
-at all.
+long as **at least one** does.  When none resolves, `ImagesReady` goes `False` if
+the image catalogue was readable and held nothing, and `Unknown` if the catalogue
+could not be read at all — alert on `ImagesReady != True`, not on `False` alone,
+and on `karpenter_hetzner_image_resolution_errors_total` for the unreadable case.
 
 Selection then skips any instance type whose architecture has no resolved image.
 The consequences differ by NodePool:
@@ -120,8 +122,8 @@ The consequences differ by NodePool:
 - A NodePool permitting several architectures **silently launches one of the
   others**.  A mislabelled arm64 snapshot does not fail — it quietly yields
   amd64 nodes, possibly at a higher price.  Watch
-  `karpenter_hetzner_instance_type_skipped_total{reason="no_resolved_image"}`,
-  which counts exactly this.
+  `karpenter_hetzner_instance_type_selection_skipped_total{reason="no_resolved_image"}`,
+  which counts one per launch that had to route around the missing image.
 - A NodePool pinned to the architecture with no image fails the launch with a
   `NodeClassNotReady` error naming the missing architecture, and Karpenter
   deletes the NodeClaim rather than retrying it forever.

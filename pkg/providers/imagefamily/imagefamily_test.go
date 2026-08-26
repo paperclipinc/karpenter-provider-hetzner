@@ -233,8 +233,8 @@ func TestResolve_DistinguishesNotFoundFromAPIFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an empty catalogue")
 	}
-	if !IsNotFound(err) {
-		t.Errorf("empty catalogue should be NotFound, got %T: %v", err, err)
+	if !IsPermanent(err) {
+		t.Errorf("empty catalogue should be permanent, got %T: %v", err, err)
 	}
 
 	// Catalogue unreadable -> must NOT look definitive.
@@ -243,7 +243,23 @@ func TestResolve_DistinguishesNotFoundFromAPIFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the list call fails")
 	}
-	if IsNotFound(err) {
-		t.Errorf("an API failure must not be reported as NotFound: %v", err)
+	if IsPermanent(err) {
+		t.Errorf("an API failure must not be reported as permanent: %v", err)
+	}
+}
+
+// TestResolve_UnsupportedFamilyIsPermanent verifies that a family the provider cannot
+// handle is classified permanent, not transient. Retrying never changes the answer, and
+// the transient class is load-bearing: it makes the nodeclass controller preserve the
+// previous image IDs and keep the condition green, so misclassifying a definitively bad
+// spec here means launching stale images indefinitely with nothing reported.
+func TestResolve_UnsupportedFamilyIsPermanent(t *testing.T) {
+	p := NewProvider(&mockImageClient{})
+	_, err := p.Resolve(context.Background(), apiv1.ImageSelector{Family: "windows"}, hcloud.ArchitectureX86)
+	if err == nil {
+		t.Fatal("expected an error for an unsupported family")
+	}
+	if !IsPermanent(err) {
+		t.Errorf("unsupported family must be permanent, got %T: %v", err, err)
 	}
 }

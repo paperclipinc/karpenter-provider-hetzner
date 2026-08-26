@@ -109,6 +109,13 @@ type ResolvedImage struct {
 type HCloudNodeClassStatus struct {
 	// +optional
 	Conditions []status.Condition `json:"conditions,omitempty"`
+	// ResolvedImages holds one image ID per hcloud architecture, resolved from
+	// Spec.ImageSelector. The generation these answer is not stored alongside them: it is
+	// read back from the ImagesReady condition's observedGeneration, which operatorpkg
+	// stamps on every condition write and which has been part of the shipped CRD since
+	// v1. A dedicated status field would be pruned to zero by any apiserver still serving
+	// the CRD from an earlier release -- Helm never upgrades crds/ -- which would make
+	// the carry-forward below silently inert on exactly the clusters it protects.
 	// +optional
 	ResolvedImages []ResolvedImage `json:"resolvedImages,omitempty"`
 }
@@ -142,4 +149,40 @@ type HCloudNodeClassList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []HCloudNodeClass `json:"items"`
+}
+
+// ResolvedImagesGeneration returns the metadata.generation that the entries currently
+// in Status.ResolvedImages were resolved under, read from the ImagesReady condition's
+// observedGeneration. operatorpkg stamps that on every condition write, and the
+// nodeclass controller always writes the condition in the same pass it writes
+// ResolvedImages, so the two stay in step.
+//
+// Reads the raw condition slice rather than StatusConditions().Get: the ConditionSet
+// constructor initializes any absent dependent condition to Unknown stamped with the
+// CURRENT generation, so going through it would both mutate the object and report a
+// never-resolved NodeClass as up to date. Absent therefore reads as zero, which fails
+// safe -- a generation of zero never matches a real one, so callers discard rather
+// than trust the entries.
+func (in *HCloudNodeClass) ResolvedImagesGeneration() int64 {
+	for _, cond := range in.Status.Conditions {
+		if cond.Type == ConditionTypeImagesReady {
+			return cond.ObservedGeneration
+		}
+	}
+	return 0
+}
+
+// CurrentResolvedImages returns Status.ResolvedImages when they were resolved under the
+// current spec generation, and nil otherwise. Consumers must not launch an image that
+// answers a superseded Spec.ImageSelector: nothing upstream enforces this, because
+// karpenter core's NodeClass readiness gate compares no observedGeneration, so a
+// NodeClass whose spec was just edited still reads Ready=True until the nodeclass
+// controller reconciles it -- and stays that way indefinitely if that controller is
+// wedged. Discarding stale entries falls back to a live lookup against the current
+// selector, which is what this provider did before status was consulted at all.
+func (in *HCloudNodeClass) CurrentResolvedImages() []ResolvedImage {
+	if in.ResolvedImagesGeneration() != in.Generation {
+		return nil
+	}
+	return in.Status.ResolvedImages
 }

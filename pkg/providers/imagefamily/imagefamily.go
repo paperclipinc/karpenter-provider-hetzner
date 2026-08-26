@@ -32,23 +32,26 @@ func labelSelectorString(m map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
-// NotFoundError reports that the image catalogue was read successfully and holds no
-// image matching the selector for this architecture -- as opposed to a failure to read
-// the catalogue at all, where absence is simply unknown. Callers must not treat an
-// unreadable catalogue as proof that no image exists: an HCloudNodeClass that clears a
-// resolved architecture on a 429 makes Karpenter delete NodeClaims over an API blip.
-// Errors that are not a NotFoundError are therefore assumed transient, which is the
-// safe direction: a misclassified transient keeps stale state, a misclassified
-// definitive discards good state.
-type NotFoundError struct{ error }
+// PermanentError reports that retrying will not change the answer: the catalogue was
+// read and holds no match, or the selector can never match. It is distinct from a
+// failure to read the catalogue at all, where absence is simply unknown.
+//
+// Callers must not treat an unreadable catalogue as proof that no image exists: an
+// HCloudNodeClass that clears a resolved architecture on a 429 makes Karpenter delete
+// NodeClaims over an API blip. Errors that are not a PermanentError are therefore
+// assumed transient, which is the safe direction for an error whose cause is unknown --
+// a misclassified transient keeps stale state, a misclassified permanent discards good
+// state. Inputs known to be bad must be classified permanent explicitly, since the
+// transient path preserves state and keeps the NodeClass green.
+type PermanentError struct{ error }
 
-func newNotFoundError(format string, args ...any) *NotFoundError {
-	return &NotFoundError{error: fmt.Errorf(format, args...)}
+func newPermanentError(format string, args ...any) *PermanentError {
+	return &PermanentError{error: fmt.Errorf(format, args...)}
 }
 
-// IsNotFound reports whether err means the catalogue definitively lacks the image.
-func IsNotFound(err error) bool {
-	var e *NotFoundError
+// IsPermanent reports whether err will produce the same result on every retry.
+func IsPermanent(err error) bool {
+	var e *PermanentError
 	return errors.As(err, &e)
 }
 
@@ -80,7 +83,7 @@ func (p *Provider) Resolve(ctx context.Context, selector apiv1.ImageSelector, ar
 	case "talos":
 		img, err = p.resolveTalos(ctx, selector.Version, arch, ls)
 	default:
-		return nil, fmt.Errorf("unsupported image family %q: must be one of ubuntu, talos", selector.Family)
+		return nil, newPermanentError("unsupported image family %q: must be one of ubuntu, talos", selector.Family)
 	}
 	if err != nil {
 		return nil, err
@@ -117,9 +120,9 @@ func (p *Provider) resolveUbuntu(ctx context.Context, version string, arch hclou
 	}
 
 	if version != "" {
-		return nil, newNotFoundError("no ubuntu image found for version %q and arch %q", version, arch)
+		return nil, newPermanentError("no ubuntu image found for version %q and arch %q", version, arch)
 	}
-	return nil, newNotFoundError("no ubuntu image found for arch %q", arch)
+	return nil, newPermanentError("no ubuntu image found for arch %q", arch)
 }
 
 // resolveTalos finds the newest snapshot image whose description contains "talos" and optionally the given version.
@@ -149,9 +152,9 @@ func (p *Provider) resolveTalos(ctx context.Context, version string, arch hcloud
 
 	if best == nil {
 		if version != "" {
-			return nil, newNotFoundError("no talos snapshot found for version %q and arch %q", version, arch)
+			return nil, newPermanentError("no talos snapshot found for version %q and arch %q", version, arch)
 		}
-		return nil, newNotFoundError("no talos snapshot found for arch %q", arch)
+		return nil, newPermanentError("no talos snapshot found for arch %q", arch)
 	}
 	return best, nil
 }

@@ -2,11 +2,11 @@ package instancetype
 
 import (
 	"context"
-	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"testing"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
 
 // mockServerTypeClient is a fake ServerTypeClient for testing.
