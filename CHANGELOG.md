@@ -7,9 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-08-26
+
+### Fixed
+- Chart RBAC grants event `create`/`patch` on the `events.k8s.io` API group alongside the legacy core group. The nodeclass controller records events through controller-runtime's `GetEventRecorder`, which writes `events.k8s.io` Events, so the controller logged `events.events.k8s.io is forbidden` on every event it tried to emit. The core `""` group is kept because karpenter core still uses the legacy recorder (#52).
+
+### Security
+- Go toolchain bumped to 1.26.7 (from 1.26.5), clearing five stdlib vulnerabilities flagged by govulncheck (GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, GO-2026-5026; all fixed by 1.26.6). The release image builder is pinned to `golang:1.26.7-alpine` so the shipped binary is built with the same toolchain CI tests with. Local builds now require Go >= 1.26.7 (#57).
+
 ### Changed
-- Go toolchain bumped to 1.26.7 (from 1.26.5), clearing five stdlib vulnerabilities flagged by govulncheck (GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, GO-2026-5026; all fixed by 1.26.6). The release image builder is pinned to `golang:1.26.7-alpine` so the shipped binary is built with the same toolchain CI tests with. Local builds now require Go >= 1.26.7.
-- `make vendor-core-crds` downloads the `sigs.k8s.io/karpenter` module before resolving its directory, fixing `generate` CI failures on any PR that changes `go.mod`/`go.sum` (cold module cache made `go list -m` return an empty dir).
+- `make vendor-core-crds` downloads the `sigs.k8s.io/karpenter` module before resolving its directory, fixing `generate` CI failures on any PR that changes `go.mod`/`go.sum` (cold module cache made `go list -m` return an empty dir) (#57).
+
+### Changed (dependencies)
+- Bumped `sigs.k8s.io/karpenter` to 1.14.1, `hetznercloud/hcloud-go` to 2.47.0, and `k8s.io/{api,apimachinery,client-go}` to 0.36.4 (#58).
 
 ## [2.1.0] - 2026-08-01
 
@@ -90,7 +100,8 @@ detection, observability, supply-chain attestations, and adoption docs.
 - Grant full Karpenter-core RBAC in Helm chart (#13).
 - Treat `unsupported location for server type` as an unavailable offering rather than a hard error (#16).
 
-[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v0.3.0...v1.0.0
