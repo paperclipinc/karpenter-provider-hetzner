@@ -164,8 +164,9 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	// enabled, cmd/controller wraps this provider in karpenter's overlay.Decorate, which
 	// overrides GetInstanceTypes but inherits Create unchanged -- so core ranks types on
 	// overlaid prices while the selection below ranks on raw hcloud prices, and the two
-	// can disagree. The decorator wraps from outside, so Create cannot reach the overlaid
-	// view; closing the gap needs core to decorate Create too. The gate defaults off.
+	// can disagree. The gate defaults off. This is closable here rather than upstream:
+	// Create needs the nodeoverlay store, not the decorator, and the store is public and
+	// already held in main.go. Left to a follow-up to keep this change reviewable.
 	instanceTypes, err := cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
 	if err != nil {
 		return nil, fmt.Errorf("listing instance types: %w", err)
