@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-02
+
 ### Changed
 - Server type selection now launches the cheapest compatible offering instead of the first type the hcloud API happened to return. Karpenter core already ranks the instance types it sends by price; the provider iterated them in hcloud's own order (ascending server-type id), which puts the pricier CPX family ahead of CX and could buy a type several times the cost of an identically sized alternative. Selection and launch now derive from a single offering, so the location a server is created in — and the `topology.kubernetes.io/zone` label stamped on the node — always match the offering whose price it was ranked on (#50).
 - **Check your NodePools before upgrading.** A NodePool that does not constrain `kubernetes.io/arch` may now get arm64 (CAX) nodes wherever an ARM offering prices below the amd64 ones it permits — the old hcloud-id ordering produced amd64 incidentally, not by policy. Pods with amd64-only images and no arch `nodeSelector` fail on such nodes with `exec format error`. Pin `kubernetes.io/arch: [amd64]` on those NodePools to keep the previous behaviour. The architecture remains the pool's choice, not the provider's: Karpenter core decides which instance types are eligible for the pending pods, and the provider launches the cheapest of the ones core sent (#50).
@@ -115,7 +117,8 @@ detection, observability, supply-chain attestations, and adoption docs.
 - Grant full Karpenter-core RBAC in Helm chart (#13).
 - Treat `unsupported location for server type` as an unavailable offering rather than a hard error (#16).
 
-[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/paperclipinc/karpenter-provider-hetzner/compare/v1.0.0...v2.0.0
