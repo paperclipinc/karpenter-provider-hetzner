@@ -14,10 +14,12 @@ import (
 	"k8s.io/client-go/tools/events"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	apiv1 "github.com/paperclipinc/karpenter-provider-hetzner/pkg/apis/v1"
+	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/metrics"
 	"github.com/paperclipinc/karpenter-provider-hetzner/pkg/providers/imagefamily"
 )
 
@@ -102,13 +104,89 @@ func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (
 	}
 
 	// Image resolution for both architectures.
-	resolved, ierr := c.resolveImages(ctx, nc)
-	if ierr != nil {
-		nc.StatusConditions().SetFalse(apiv1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
-		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
-	} else {
+	// Merge this pass with what status already holds. Selection reads ResolvedImages to
+	// decide which architectures are launchable, so the two failure modes must not be
+	// conflated: a catalogue that says "no such image" is evidence, a catalogue that
+	// could not be read is not. Treating the latter as the former clears a resolved
+	// architecture and makes Karpenter delete NodeClaims over an API blip.
+	//
+	// Carry-forward is only valid while the spec is unchanged. Once metadata.generation
+	// moves past the generation those IDs were resolved under, they answer a question the
+	// spec no longer asks, and reusing them would launch the previous image while
+	// reporting the NodeClass green.
+	//
+	// The generation is read back from the ImagesReady condition rather than a status
+	// field of our own: every branch below writes that condition in the same pass that
+	// writes ResolvedImages, so its observedGeneration always describes the entries
+	// currently in status. See HCloudNodeClassStatus.ResolvedImages for why a dedicated
+	// field cannot be used.
+	if resolvedImagesGeneration(nc) != nc.Generation {
+		// The spec has moved since these IDs were resolved. They answer a question that
+		// is no longer being asked, so drop them rather than let a failed lookup below
+		// preserve them: an operator who repins imageSelector must never keep launching
+		// the previous image. Unlike an API blip, this is a deliberate spec change.
+		nc.Status.ResolvedImages = nil
+	}
+	prev := make(map[string]int64, len(nc.Status.ResolvedImages))
+	for _, ri := range nc.Status.ResolvedImages {
+		prev[ri.Architecture] = ri.ImageID
+	}
+	var resolved []apiv1.ResolvedImage
+	var transientErrs, definitiveErrs []error
+	for _, r := range c.resolveImages(ctx, nc) {
+		switch {
+		case r.err == nil:
+			resolved = append(resolved, apiv1.ResolvedImage{Architecture: string(r.arch), ImageID: r.imageID})
+		case r.transient:
+			transientErrs = append(transientErrs, r.err)
+			// Absence is unknown, so carry the last known good entry rather than
+			// reporting this architecture as gone.
+			if id, ok := prev[string(r.arch)]; ok {
+				resolved = append(resolved, apiv1.ResolvedImage{Architecture: string(r.arch), ImageID: id})
+			}
+		default:
+			definitiveErrs = append(definitiveErrs, r.err)
+		}
+	}
+	// Surface transient failures whatever the outcome. A partially successful pass still
+	// sets ImagesReady=True so a healthy architecture keeps provisioning, which means the
+	// condition alone would never reveal that the other architecture is running on a
+	// preserved ID rather than a fresh answer.
+	if len(transientErrs) > 0 {
+		ierr := errors.Join(transientErrs...)
+		logf.FromContext(ctx).Error(ierr, "image lookup failed; affected architectures keep their previous image",
+			"nodeClass", nc.Name)
+		metrics.RecordImageResolutionError()
+		c.warnf(nc, "ImageResolutionErrored", "ResolveImages", "image catalogue unreadable: %v", ierr)
+	}
+	switch {
+	case len(resolved) > 0:
 		nc.Status.ResolvedImages = resolved
 		nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	case len(transientErrs) > 0:
+		// Nothing resolved and at least one lookup was unreadable: report Unknown, as
+		// every other condition here does for an API error.
+		//
+		// Anything still in status here belongs to an architecture that failed
+		// DEFINITIVELY -- a transient one would have been carried into `resolved` above
+		// -- so it is dropped rather than left advertising an image the catalogue says
+		// is gone. Report those errors alongside the transient ones too: they are the
+		// actionable half, and reporting only the blip hides the deleted image behind a
+		// 503 the operator can do nothing about.
+		nc.Status.ResolvedImages = nil
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeImagesReady,
+			"ImageResolutionErrored",
+			errors.Join(errors.Join(transientErrs...), errors.Join(definitiveErrs...)).Error())
+		if len(definitiveErrs) > 0 {
+			ierr := errors.Join(definitiveErrs...)
+			c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
+		}
+	default:
+		// The catalogue was readable and holds nothing for any architecture.
+		ierr := errors.Join(definitiveErrs...)
+		nc.Status.ResolvedImages = nil
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeImagesReady, "ImageResolutionFailed", ierr.Error())
+		c.warnf(nc, "ImageResolutionFailed", "ResolveImages", "image resolution failed: %v", ierr)
 	}
 
 	if !equality.Semantic.DeepEqual(stored, nc) {
@@ -166,26 +244,59 @@ func (c *Controller) validateUserData(ctx context.Context, nc *apiv1.HCloudNodeC
 	return "", "", false, true
 }
 
-func (c *Controller) resolveImages(ctx context.Context, nc *apiv1.HCloudNodeClass) ([]apiv1.ResolvedImage, error) {
+// resolvedImagesGeneration returns the metadata.generation that the entries currently
+// in status.resolvedImages were resolved under. The rule is shared with the cloud
+// provider, which applies it on the read side so a launch never uses an image that
+// answers a superseded spec; see HCloudNodeClass.ResolvedImagesGeneration for why it is
+// read back from the ImagesReady condition and why absent must read as zero.
+func resolvedImagesGeneration(nc *apiv1.HCloudNodeClass) int64 {
+	return nc.ResolvedImagesGeneration()
+}
+
+// imageResolution is the outcome of resolving one architecture. transient marks an
+// error that says nothing about whether the image exists -- the catalogue could not be
+// read -- as opposed to the catalogue reporting no match.
+type imageResolution struct {
+	arch      hcloud.Architecture
+	imageID   int64
+	err       error
+	transient bool
+}
+
+func (c *Controller) resolveImages(ctx context.Context, nc *apiv1.HCloudNodeClass) []imageResolution {
 	// hcloud image IDs are global (not per-location), so resolve one image per
 	// architecture. Resolve each architecture independently: many clusters only
 	// have an image for a single arch (e.g. an all-amd64 cluster has no arm64
 	// Talos snapshot), and a NodeClass is usable as long as at least one arch
-	// resolves. Only fail when NO architecture resolves.
-	var out []apiv1.ResolvedImage
-	var errs []error
-	for _, arch := range []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM} {
+	// resolves.
+	archs := []hcloud.Architecture{hcloud.ArchitectureX86, hcloud.ArchitectureARM}
+	out := make([]imageResolution, 0, len(archs))
+	for _, arch := range archs {
 		img, err := c.images.Resolve(ctx, nc.Spec.ImageSelector, arch)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", arch, err))
-			continue
+		switch {
+		case err != nil:
+			out = append(out, imageResolution{
+				arch:      arch,
+				err:       fmt.Errorf("%s: %w", arch, err),
+				transient: !imagefamily.IsPermanent(err),
+			})
+		case img.Architecture != arch:
+			// hcloud filters by architecture server-side and the image provider does
+			// not re-check. Create launches the ID recorded here and derives the
+			// architecture from the NodeClaim, so nothing downstream can catch a
+			// mismatch on an entry that reached status: an unverified one boots a node
+			// that fails every workload with "exec format error". Create's live-lookup
+			// fallback applies the same check to the images it resolves itself.
+			out = append(out, imageResolution{
+				arch: arch,
+				err: fmt.Errorf("%s: catalogue returned image %d with architecture %q",
+					arch, img.ID, img.Architecture),
+			})
+		default:
+			out = append(out, imageResolution{arch: arch, imageID: img.ID})
 		}
-		out = append(out, apiv1.ResolvedImage{Architecture: string(arch), ImageID: img.ID})
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no image resolved for any architecture: %w", errors.Join(errs...))
-	}
-	return out, nil
+	return out
 }
 
 // Register wires the controller into the manager.

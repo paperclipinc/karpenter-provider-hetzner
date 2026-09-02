@@ -62,6 +62,26 @@ var (
 		Help:      "Total number of drift detections by reason.",
 	}, []string{"reason"})
 
+	// selectionSkippedTotal counts launches whose instance-type selection had to pass
+	// over an architecture, by architecture and reason. Incremented once per architecture
+	// per launch rather than once per skipped type, so the rate tracks how often the
+	// provider routes around the problem instead of how many types hcloud happens to
+	// publish. The common case is non-terminal -- a cheaper candidate is skipped and a
+	// pricier one launches -- so nothing else in the system reveals it.
+	selectionSkippedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "instance_type_selection_skipped_total",
+		Help:      "Total number of launches that skipped an architecture during instance-type selection, by architecture and reason.",
+	}, []string{"arch", "reason"})
+
+	// imageResolutionErrorsTotal counts image lookups that failed without proving the
+	// image absent. The NodeClass stays Ready in that case, so nothing else surfaces it.
+	imageResolutionErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "karpenter_hetzner",
+		Name:      "image_resolution_errors_total",
+		Help:      "Total number of image lookups that failed without proving the image absent.",
+	})
+
 	// instanceTypeCacheTotal counts instance-type cache lookups by result (hit|miss).
 	instanceTypeCacheTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "karpenter_hetzner",
@@ -78,6 +98,8 @@ func init() {
 		hcloudAPICallsTotal,
 		driftDetectedTotal,
 		instanceTypeCacheTotal,
+		selectionSkippedTotal,
+		imageResolutionErrorsTotal,
 	)
 }
 
@@ -100,6 +122,19 @@ func RecordServerDelete(result string) {
 // (e.g. "ImageDrift", "NetworkDrift").
 func RecordDrift(reason string) {
 	driftDetectedTotal.WithLabelValues(reason).Inc()
+}
+
+// RecordSelectionSkipped records that instance-type selection passed over an
+// architecture for a launch, e.g. reason "no_resolved_image". Call once per
+// architecture per launch, not once per skipped instance type.
+func RecordSelectionSkipped(arch, reason string) {
+	selectionSkippedTotal.WithLabelValues(arch, reason).Inc()
+}
+
+// RecordImageResolutionError records a failed image lookup that did not prove the image
+// absent, so the affected architecture kept its previously resolved ID.
+func RecordImageResolutionError() {
+	imageResolutionErrorsTotal.Inc()
 }
 
 // RecordCacheHit records an instance-type cache hit.

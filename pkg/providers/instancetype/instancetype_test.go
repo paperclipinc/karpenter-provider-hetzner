@@ -6,6 +6,7 @@ import (
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
 
 // mockServerTypeClient is a fake ServerTypeClient for testing.
@@ -161,15 +162,97 @@ func TestServerFamily(t *testing.T) {
 
 func TestHourlyNetPrice(t *testing.T) {
 	// Prefer hourly net; fall back to monthly net / 730.
-	if got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{
+	if got, ok := hourlyNetPrice(hcloud.ServerTypeLocationPricing{
 		Hourly:  hcloud.Price{Net: "0.0100"},
 		Monthly: hcloud.Price{Net: "7.3000"},
-	}); got != 0.01 {
-		t.Errorf("want 0.01 from hourly net, got %v", got)
+	}); !ok || got != 0.01 {
+		t.Errorf("want 0.01 from hourly net, got %v (ok=%v)", got, ok)
 	}
-	got := hourlyNetPrice(hcloud.ServerTypeLocationPricing{Monthly: hcloud.Price{Net: "7.3000"}})
-	if got < 0.0099 || got > 0.0101 {
-		t.Errorf("want ~0.01 from monthly net/730, got %v", got)
+	got, ok := hourlyNetPrice(hcloud.ServerTypeLocationPricing{Monthly: hcloud.Price{Net: "7.3000"}})
+	if !ok || got < 0.0099 || got > 0.0101 {
+		t.Errorf("want ~0.01 from monthly net/730, got %v (ok=%v)", got, ok)
+	}
+	// Unparseable or non-positive figures must report !ok, never a 0 price: a 0 sorts
+	// ahead of every real offering and would win every selection.
+	for _, p := range []hcloud.ServerTypeLocationPricing{
+		{},
+		{Hourly: hcloud.Price{Net: ""}, Monthly: hcloud.Price{Net: ""}},
+		{Hourly: hcloud.Price{Net: "0.0000"}, Monthly: hcloud.Price{Net: "0.0000"}},
+		{Hourly: hcloud.Price{Net: "n/a"}, Monthly: hcloud.Price{Net: "n/a"}},
+	} {
+		if got, ok := hourlyNetPrice(p); ok {
+			t.Errorf("hourlyNetPrice(%+v) = %v, ok=true; want ok=false", p, got)
+		}
+	}
+}
+
+// offeringFor returns the offering for zone, or nil.
+func offeringFor(it *cloudprovider.InstanceType, zone string) *cloudprovider.Offering {
+	for _, o := range it.Offerings {
+		if o.Zone() == zone {
+			return o
+		}
+	}
+	return nil
+}
+
+// TestToInstanceType_KeepsUnpricedOfferingUnavailable verifies that a location whose
+// price cannot be determined stays in the catalogue but is marked unavailable. Removing
+// it entirely would be worse than the zero price it replaced: karpenter core documents
+// that Offerings must list every allowed offering even when temporarily unavailable, and
+// treats a running node whose offering has vanished as drifted (drift.go
+// instanceTypeNotFound), so a transient pricing glitch would voluntarily disrupt and
+// replace every healthy node of that type in that location. Availability, not
+// membership, is what keeps it out of selection.
+func TestToInstanceType_KeepsUnpricedOfferingUnavailable(t *testing.T) {
+	st := makeServerType("cx22", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40,
+		[]hcloud.ServerTypeLocationPricing{
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0070"}},
+			{Location: &hcloud.Location{Name: "hel1"}},
+		})
+	it := toInstanceType(st)
+	if len(it.Offerings) != 2 {
+		t.Fatalf("expected both offerings to remain in the catalogue, got %d", len(it.Offerings))
+	}
+	hel1 := offeringFor(it, "hel1")
+	if hel1 == nil {
+		t.Fatal("hel1 offering was dropped; running nodes there would drift")
+	}
+	if hel1.Available {
+		t.Error("unpriced hel1 offering must be unavailable so it is never selected")
+	}
+	if nbg1 := offeringFor(it, "nbg1"); nbg1 == nil || !nbg1.Available {
+		t.Errorf("priced nbg1 offering should stay available, got %+v", nbg1)
+	}
+}
+
+// TestToInstanceType_IgnoresLocationAvailableFlag pins a deliberate decision: hcloud's
+// ServerType.Locations[].Available is NOT used to gate offering availability, because it
+// is wrong in both directions. False negatives: observed reading false for (cx53, nbg1)
+// 50 minutes after the API accepted a cx53 create there, and across all three eu-central
+// locations while eight cx53 nodes were running. False positives: a datacenter reporting
+// cx43 as available and available_for_migration still rejected the create with
+// resource_unavailable. Gating on it drops good offerings out of ranking, so a 32Gi pod
+// falls through cx53 (EUR 29.49) to cpx62 (EUR 129.99). Withdrawn pairs are handled
+// reactively by the unavailable cache, which marks a pair only after a real create
+// failure and so cannot be fooled either way.
+func TestToInstanceType_IgnoresLocationAvailableFlag(t *testing.T) {
+	st := makeServerType("cx53", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 16, 32, 320,
+		[]hcloud.ServerTypeLocationPricing{
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0404"}},
+		})
+	// What the API actually reports while cx53 nodes are running in nbg1.
+	st.Locations = []hcloud.ServerTypeLocation{
+		{Location: &hcloud.Location{Name: "nbg1"}, Available: false},
+	}
+	it := toInstanceType(st)
+	o := offeringFor(it, "nbg1")
+	if o == nil {
+		t.Fatal("nbg1 offering missing")
+	}
+	if !o.Available {
+		t.Error("gated on Locations[].Available: a priced, creatable offering was excluded " +
+			"from ranking, which falls through to a far pricier type")
 	}
 }
 
@@ -239,5 +322,38 @@ func TestList_ReflectsUnavailable(t *testing.T) {
 		if zone == "nbg1" && !o.Available {
 			t.Error("cached struct was mutated: original nbg1 offering Available should still be true")
 		}
+	}
+}
+
+// TestList_PreservesCatalogueUnavailability verifies that List does not resurrect an
+// offering the catalogue marked unavailable. applyAvailability recomputes Available from
+// the capacity cache on every call; if it overwrote rather than ANDed, an unpriced or
+// hcloud-withdrawn offering would come back available on the very next List and be
+// selected as the cheapest -- silently undoing the catalogue-level guard.
+func TestList_PreservesCatalogueUnavailability(t *testing.T) {
+	// hel1 carries no usable price, so it cannot be ranked and must stay unavailable.
+	st := makeServerType("cx22", hcloud.ArchitectureX86, hcloud.CPUTypeShared, 2, 4, 40,
+		[]hcloud.ServerTypeLocationPricing{
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.0070"}},
+			{Location: &hcloud.Location{Name: "hel1"}},
+		})
+	p := NewProvider(&mockServerTypeClient{types: []*hcloud.ServerType{st}})
+
+	types, err := p.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(types) != 1 {
+		t.Fatalf("expected 1 instance type, got %d", len(types))
+	}
+	hel1 := offeringFor(types[0], "hel1")
+	if hel1 == nil {
+		t.Fatal("hel1 offering missing from List output")
+	}
+	if hel1.Available {
+		t.Error("List resurrected the unpriced hel1 offering; a 0 price would win cheapest-first")
+	}
+	if nbg1 := offeringFor(types[0], "nbg1"); nbg1 == nil || !nbg1.Available {
+		t.Errorf("nbg1 should remain available through List, got %+v", nbg1)
 	}
 }

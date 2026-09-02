@@ -2,6 +2,7 @@ package cloudprovider_test
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcp "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
@@ -109,8 +111,20 @@ func (f *fakeServerTypeClient) All(_ context.Context) ([]*hcloud.ServerType, err
 
 type fakeImageClient struct{ images []*hcloud.Image }
 
-func (f *fakeImageClient) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
-	return f.images, nil
+func (f *fakeImageClient) AllWithOpts(_ context.Context, opts hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	if len(opts.Architecture) == 0 {
+		return f.images, nil
+	}
+	// hcloud filters images by architecture server-side and the provider never
+	// re-filters client-side, so a fake that ignores this hands back wrong-arch images
+	// and hides every arch-related failure.
+	var out []*hcloud.Image
+	for _, img := range f.images {
+		if slices.Contains(opts.Architecture, img.Architecture) {
+			out = append(out, img)
+		}
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +213,15 @@ func cx22Type() *hcloud.ServerType {
 func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.ServerType) (
 	*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
 	t.Helper()
+	return buildCPWithImages(t, nc, types,
+		[]*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}})
+}
+
+// buildCPWithImages is buildCPWithTypes with an explicit image catalogue, for tests that
+// need the live image lookup to fail or to return something other than image 42.
+func buildCPWithImages(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.ServerType,
+	images []*hcloud.Image) (*cloudprovider.CloudProvider, *fakeServerClient, *instancetype.Provider) {
+	t.Helper()
 	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	if nc.Name == "" {
 		nc.Name = "default"
@@ -206,13 +229,28 @@ func buildCPWithTypes(t *testing.T, nc *apiv1.HCloudNodeClass, types []*hcloud.S
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
 	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
 	stc := &fakeServerTypeClient{types: types}
-	imgc := &fakeImageClient{images: []*hcloud.Image{{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86}}}
+	imgc := &fakeImageClient{images: images}
 	typeProvider := instancetype.NewProvider(stc)
 	cp := cloudprovider.NewCloudProvider(kube,
 		instance.NewProvider(fsc, "test-cluster"),
 		typeProvider,
 		imagefamily.NewProvider(imgc))
 	return cp, fsc, typeProvider
+}
+
+// withResolvedImages stamps images onto nc the way a successful reconcile does: entries
+// plus an ImagesReady condition carrying the current metadata.generation.
+//
+// Setting Status.ResolvedImages alone is not equivalent. Consumers gate on the recorded
+// generation matching metadata.generation, and a bare NodeClass has generation 0, so
+// entries with no condition match by 0 == 0 -- a state no real cluster can be in, since
+// generation is >= 1 from creation onward. A test built that way keeps passing even if
+// the gate is broken for every generation an apiserver would actually assign.
+func withResolvedImages(nc *apiv1.HCloudNodeClass, images ...apiv1.ResolvedImage) *apiv1.HCloudNodeClass {
+	nc.Generation = 1
+	nc.Status.ResolvedImages = images
+	nc.StatusConditions().SetTrue(apiv1.ConditionTypeImagesReady)
+	return nc
 }
 
 // createNodeClaim returns a NodeClaim with empty requirements (compatible with any type).
@@ -702,5 +740,547 @@ func TestIsDrifted_Labels_Empty(t *testing.T) {
 	}
 	if reason != "" {
 		t.Errorf("expected no drift for empty spec labels, got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Price-based selection
+// ---------------------------------------------------------------------------
+
+// armType builds an arm64 server type in nbg1 at the given net hourly price. Cheap ARM
+// candidates recur in these tests because they are what cheapest-first reaches for when a
+// NodePool leaves kubernetes.io/arch unconstrained.
+func armType(name, hourly string) *hcloud.ServerType {
+	return &hcloud.ServerType{
+		Name: name, Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureARM, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{{
+			Location: &hcloud.Location{Name: "nbg1"},
+			Hourly:   hcloud.Price{Net: hourly},
+		}},
+	}
+}
+
+// hourlyType builds a compatible x86 server type in nbg1 at the given net hourly price.
+func hourlyType(name string, cores int, memGB float32, hourly string) *hcloud.ServerType {
+	return &hcloud.ServerType{
+		Name: name, Cores: cores, Memory: memGB, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{{
+			Location: &hcloud.Location{Name: "nbg1"},
+			Hourly:   hcloud.Price{Net: hourly},
+		}},
+	}
+}
+
+// TestCreate_PicksCheapestCompatibleType verifies that Create launches the cheapest
+// compatible type, not the first one the Hetzner API happened to return. Hetzner lists
+// server types by ascending id, which puts the expensive CPX family (ids 108-113) ahead
+// of CX (114-117), so a provider that takes the first match buys cpx42 (EUR 69.49) where
+// cx43 (EUR 15.99) fits identically.
+func TestCreate_PicksCheapestCompatibleType(t *testing.T) {
+	// Cheapest deliberately in the MIDDLE: a two-element fixture cannot distinguish
+	// "sorted by price" from "reversed the input".
+	types := []*hcloud.ServerType{
+		hourlyType("cpx42", 8, 16, "0.1130"),
+		hourlyType("cx43", 8, 16, "0.0260"),
+		hourlyType("cpx52", 12, 24, "0.1650"),
+	}
+	cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.ServerType == nil {
+		t.Fatal("no server type recorded on create")
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Errorf("expected cheapest compatible type cx43 (EUR 15.99/mo), got %q (cpx42 is EUR 69.49/mo)", got)
+	}
+}
+
+// TestCreate_LaunchesInCheapestCompatibleLocation verifies that Create launches in the
+// cheapest compatible location and stamps that same location on the NodeClaim's zone
+// label. OrderByPrice ranks a type by its minimum-priced offering across locations, so
+// selecting the type and then launching at Pricings[0] can bill several times that
+// minimum. A zone label taken from a different offering would disagree with where the
+// server actually is, which breaks karpenter core's node pricing and consolidation.
+// Hetzner prices a given type identically across eu-central today, which keeps this
+// latent there, but it is wrong wherever prices differ per location.
+func TestCreate_LaunchesInCheapestCompatibleLocation(t *testing.T) {
+	st := &hcloud.ServerType{
+		Name: "cx43", Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{
+			// Expensive location listed first, mirroring hcloud Pricings order.
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}},
+			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}},
+		},
+	}
+	nc := baselineNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "hel1"}
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{st})
+
+	created, err := cp.Create(context.Background(), createNodeClaim())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Location == nil {
+		t.Fatal("no location recorded on create")
+	}
+	if got := fsc.lastOpts.Location.Name; got != "hel1" {
+		t.Errorf("expected launch in cheapest location hel1 (0.05/h), got %q (nbg1 is 0.30/h)", got)
+	}
+	if got := created.Labels[corev1.LabelTopologyZone]; got != fsc.lastOpts.Location.Name {
+		t.Errorf("zone label %q disagrees with the launch location %q", got, fsc.lastOpts.Location.Name)
+	}
+}
+
+// TestCreate_SkipsCheaperExcludedType verifies that a cheaper type the NodeClaim does
+// not admit is passed over rather than launched, whichever requirement key excludes it.
+// Price ordering promotes such a type to the front of selection, so this exercises the
+// requirement filter cheapest-first newly leans on. The instance-type case is the one
+// core actually sends: it narrows node.kubernetes.io/instance-type to the types
+// compatible with the pending pods, which is what keeps architecture core's decision
+// rather than the provider's.
+func TestCreate_SkipsCheaperExcludedType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  karpv1.NodeSelectorRequirementWithMinValues
+	}{
+		{"by arch", karpv1.NodeSelectorRequirementWithMinValues{
+			Key: corev1.LabelArchStable, Operator: corev1.NodeSelectorOpIn,
+			Values: []string{"amd64"},
+		}},
+		{"by core's instance-type list", karpv1.NodeSelectorRequirementWithMinValues{
+			Key: corev1.LabelInstanceTypeStable, Operator: corev1.NodeSelectorOpIn,
+			Values: []string{"cpx42", "cx43"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The expensive admitted type is listed FIRST, so the expected answer is
+			// reachable only by price: an unordered first-match loop would buy cpx42.
+			types := []*hcloud.ServerType{
+				hourlyType("cpx42", 8, 16, "0.1130"),
+				armType("cax31", "0.0100"), // cheapest, excluded by both requirements
+				hourlyType("cx43", 8, 16, "0.0260"),
+			}
+			cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+
+			claim := createNodeClaim()
+			claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{tc.req}
+			if _, err := cp.Create(context.Background(), claim); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if fsc.lastOpts.ServerType == nil {
+				t.Fatal("no server type recorded on create")
+			}
+			if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+				t.Errorf("expected cheapest ADMITTED type cx43, got %q (cax31 is cheaper but excluded)", got)
+			}
+		})
+	}
+}
+
+// TestCreate_HonoursZoneRequirementOverPrice verifies that a zone pinned by the
+// NodeClaim wins over a cheaper offering elsewhere. Every other test here drives Create
+// with an empty requirement set, which makes the Compatible(reqs) filter on the offering
+// a no-op; this is the case that pins it. It matters for PVC-bound pods: commit c9c8096
+// aliases csi.hetzner.cloud/location onto topology.kubernetes.io/zone so a volume's
+// nodeAffinity reaches this filter, and launching in the cheapest other zone instead
+// would strand the volume.
+func TestCreate_HonoursZoneRequirementOverPrice(t *testing.T) {
+	st := &hcloud.ServerType{
+		Name: "cx43", Cores: 8, Memory: 16, Disk: 160,
+		Architecture: hcloud.ArchitectureX86, CPUType: hcloud.CPUTypeShared,
+		Pricings: []hcloud.ServerTypeLocationPricing{
+			{Location: &hcloud.Location{Name: "nbg1"}, Hourly: hcloud.Price{Net: "0.3000"}},
+			{Location: &hcloud.Location{Name: "hel1"}, Hourly: hcloud.Price{Net: "0.0500"}},
+		},
+	}
+	nc := baselineNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "hel1"}
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{st})
+
+	// Pin the EXPENSIVE zone: only the Compatible(reqs) filter can produce this answer.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelTopologyZone,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"nbg1"},
+		},
+	}
+
+	created, err := cp.Create(context.Background(), claim)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Location == nil {
+		t.Fatal("no location recorded on create")
+	}
+	if got := fsc.lastOpts.Location.Name; got != "nbg1" {
+		t.Errorf("expected the required zone nbg1, got %q (hel1 is cheaper but not allowed)", got)
+	}
+	if got := created.Labels[corev1.LabelTopologyZone]; got != "nbg1" {
+		t.Errorf("zone label = %q, want nbg1", got)
+	}
+}
+
+// TestCreate_SkipsArchWithoutResolvedImage verifies that Create walks past a cheaper
+// instance type whose architecture the NodeClass has no image for, instead of
+// dead-ending on it. The nodeclass controller deliberately marks a NodeClass Ready when
+// only ONE architecture resolves ("an all-amd64 cluster has no arm64 Talos snapshot"),
+// so an x86-only catalog is a supported configuration -- and cheapest-first selection
+// steers into it whenever a pool permits both architectures and the ARM candidate
+// prices lower for the requested shape. Create breaks
+// out of the selection loop before resolving the image, so without this filter the miss
+// is terminal: the type is never demoted, never marked unavailable, and karpenter core
+// requeues the same doomed candidate forever while cx43 sits one iteration away.
+func TestCreate_SkipsArchWithoutResolvedImage(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	// Exactly what resolveImages records for an x86-only image catalog.
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	types := []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")}
+	cp, fsc, _ := buildCPWithTypes(t, nc, types)
+
+	// No arch requirement: the NodeClaim itself permits arm64, so only the
+	// resolved-image filter can keep Create off cax31.
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.ServerType == nil {
+		t.Fatal("no server type recorded on create")
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Errorf("expected cx43, the cheapest type with a resolved image, got %q", got)
+	}
+}
+
+// TestCreate_ReportsMissingImageNotCapacity verifies that a NodeClaim blocked purely by
+// a missing image reports that, rather than InsufficientCapacityError. The two need
+// different responses: capacity is transient and worth a backoff retry, a missing image
+// is a configuration problem that no amount of retrying fixes. Reporting it as capacity
+// sends operators to their Hetzner quotas for a problem that lives in the NodeClass.
+// This is reachable whenever a NodeClass resolves only some architectures -- which the
+// nodeclass controller explicitly supports -- and a NodePool pins one of the others.
+func TestCreate_ReportsMissingImageNotCapacity(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
+
+	// An arm64 NodePool on a NodeClass that only resolved an amd64 image.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelArchStable,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"arm64"},
+		},
+	}
+
+	_, err := cp.Create(context.Background(), claim)
+	if err == nil {
+		t.Fatal("expected an error when no architecture has a resolved image")
+	}
+	// Assert the TYPE, not just "not capacity": core switches on it in launch.go. A bare
+	// error falls to the default branch, which parks the NodeClaim in Launched=Unknown and
+	// requeues it forever; NodeClassNotReady deletes the claim so the scheduler can try a
+	// different shape. Asserting only "not an ICE" also passes for the pre-fix dead-end
+	// error from imageProvider.Resolve, which says "image" and "arm" too.
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "has no resolved image for architecture") {
+		t.Errorf("error should name the missing resolved image, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), string(hcloud.ArchitectureARM)) {
+		t.Errorf("error should name the architecture, got: %v", err)
+	}
+}
+
+// TestCreate_PrefersCapacityErrorWhenBothBlock verifies that a candidate which cleared
+// the image gate and failed only for want of an available offering still yields
+// InsufficientCapacityError, even though a different candidate was image-blocked.
+// Capacity carries core's retry and MarkUnavailable semantics, so an unrelated missing
+// image must not mask a candidate that a retry could actually satisfy.
+func TestCreate_PrefersCapacityErrorWhenBothBlock(t *testing.T) {
+	cheapArm := armType("cax31", "0.0100")
+	nc := baselineNodeClass()
+	// arm64 has no image; amd64 does, so cx43 reaches the offering check.
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	cp, _, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cheapArm, hourlyType("cx43", 8, 16, "0.0260")})
+
+	// Both types are offered only in nbg1, so pinning hel1 leaves cx43 with no
+	// compatible offering: image-eligible, capacity-blocked.
+	claim := createNodeClaim()
+	claim.Spec.Requirements = []karpv1.NodeSelectorRequirementWithMinValues{
+		{
+			Key:      corev1.LabelTopologyZone,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{"hel1"},
+		},
+	}
+
+	_, err := cp.Create(context.Background(), claim)
+	if err == nil {
+		t.Fatal("expected an error when no offering is available")
+	}
+	if !karpcp.IsInsufficientCapacityError(err) {
+		t.Errorf("expected InsufficientCapacityError, got %v", err)
+	}
+}
+
+// TestCreate_TieBreaksDeterministically verifies that two types tied on cheapest price
+// resolve to the same one every time. karpenter core's OrderByPrice sorts with the
+// unstable sort.Slice and has no tiebreak, so tied types come out in an order that
+// shifts when an unrelated type is added or an offering's availability flips -- two
+// NodeClaims from one NodePool could land on different CPU shapes or architectures,
+// failing a Deployment on some replicas and not others. Ties break on name here.
+func TestCreate_TieBreaksDeterministically(t *testing.T) {
+	tied := func(name string, arch hcloud.Architecture) *hcloud.ServerType {
+		return &hcloud.ServerType{
+			Name: name, Cores: 8, Memory: 16, Disk: 160,
+			Architecture: arch, CPUType: hcloud.CPUTypeShared,
+			Pricings: []hcloud.ServerTypeLocationPricing{{
+				Location: &hcloud.Location{Name: "nbg1"},
+				Hourly:   hcloud.Price{Net: "0.0260"},
+			}},
+		}
+	}
+	// Same two tied types, presented in different catalogue orders and with a differing
+	// number of pricier decoys, which is what perturbs an unstable sort's pivot choice.
+	orders := [][]*hcloud.ServerType{
+		{tied("cpx41", hcloud.ArchitectureX86), tied("ccx13", hcloud.ArchitectureX86)},
+		{tied("ccx13", hcloud.ArchitectureX86), tied("cpx41", hcloud.ArchitectureX86)},
+		{hourlyType("cpx52", 12, 24, "0.9000"), tied("cpx41", hcloud.ArchitectureX86),
+			hourlyType("cpx62", 16, 32, "0.9900"), tied("ccx13", hcloud.ArchitectureX86)},
+	}
+	for i, types := range orders {
+		cp, fsc, _ := buildCPWithTypes(t, baselineNodeClass(), types)
+		if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+			t.Fatalf("order %d: Create: %v", i, err)
+		}
+		if got := fsc.lastOpts.ServerType.Name; got != "ccx13" {
+			t.Errorf("order %d: tie resolved to %q, want the deterministic winner ccx13", i, got)
+		}
+	}
+}
+
+// TestGetInstanceTypes_MarksImagelessArchUnavailable verifies that architectures the
+// NodeClass has no image for are advertised to karpenter core as unavailable, while
+// staying in the catalogue.
+//
+// Availability and membership do different jobs here. The scheduler's fits() gates on
+// an available compatible offering, so dropping availability stops core scheduling onto
+// an architecture Create will refuse -- without it, core creates a NodeClaim, Create
+// returns NodeClassNotReadyError, core deletes the claim, and the next cycle recreates
+// the identical claim forever with no backoff. Drift, by contrast, checks
+// Offerings.HasCompatible with no Available() filter, so keeping the offering listed
+// means running nodes of that type are not drifted and replaced. This is the same
+// mechanism already used for unpriced offerings.
+func TestGetInstanceTypes_MarksImagelessArchUnavailable(t *testing.T) {
+	nc := baselineNodeClass()
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	types := []*hcloud.ServerType{armType("cax31", "0.0100"), hourlyType("cx43", 8, 16, "0.0260")}
+	cp, _, _ := buildCPWithTypes(t, nc, types)
+
+	nodePool := &karpv1.NodePool{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodePool.Spec.Template.Spec.NodeClassRef = &karpv1.NodeClassReference{
+		Name: "default", Group: apiv1.Group, Kind: "HCloudNodeClass",
+	}
+
+	its, err := cp.GetInstanceTypes(context.Background(), nodePool)
+	if err != nil {
+		t.Fatalf("GetInstanceTypes: %v", err)
+	}
+	byName := map[string]*karpcp.InstanceType{}
+	for _, it := range its {
+		byName[it.Name] = it
+	}
+
+	arm, ok := byName["cax31"]
+	if !ok {
+		t.Fatal("cax31 was removed from the catalogue; running arm nodes would drift")
+	}
+	if len(arm.Offerings.Available()) != 0 {
+		t.Error("cax31 has no resolved image but is still advertised as available; core will schedule onto it")
+	}
+	if len(arm.Offerings) == 0 {
+		t.Error("cax31 offerings were dropped rather than marked unavailable")
+	}
+
+	amd, ok := byName["cx43"]
+	if !ok {
+		t.Fatal("cx43 missing from catalogue")
+	}
+	if len(amd.Offerings.Available()) == 0 {
+		t.Error("cx43 has a resolved image and must stay available")
+	}
+}
+
+// TestCreate_LaunchesStatusResolvedImageID verifies that the launch uses the image the
+// gate admitted the architecture on, rather than re-deriving one live. Two sources can
+// disagree: the gate consults status.resolvedImages while a second live lookup could
+// return a different image or fail outright, which is how a candidate could pass
+// selection and then die at image resolution. The status ID is deliberately different
+// from what the image client would return, so only reading status produces it.
+func TestCreate_LaunchesStatusResolvedImageID(t *testing.T) {
+	nc := baselineNodeClass()
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 99})
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cx22Type()})
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Image == nil {
+		t.Fatal("no image recorded on create")
+	}
+	if got := fsc.lastOpts.Image.ID; got != 99 {
+		t.Errorf("launched image %d, want 99 from status.resolvedImages (42 means a second live lookup won)", got)
+	}
+}
+
+// TestCreate_LiveImageNotFoundIsTerminal verifies that when status carries no entry for
+// the architecture -- the un-reconciled NodeClass case, where the gate deliberately
+// fails open -- a definitive miss from the live lookup is still classified. A bare error
+// lands in launch.go's default branch, which parks the NodeClaim at Launched=Unknown and
+// requeues it forever; deterministic selection then re-picks the same doomed type every
+// cycle. NodeClassNotReadyError makes core delete the claim instead.
+func TestCreate_LiveImageNotFoundIsTerminal(t *testing.T) {
+	// Empty catalogue: the live lookup definitively finds nothing.
+	cp, _, _ := buildCPWithImages(t, baselineNodeClass(), []*hcloud.ServerType{cx22Type()}, nil)
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("expected an error when no image can be resolved")
+	}
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+}
+
+// unfilteredImages ignores the architecture filter and always answers with an x86 image,
+// standing in for a catalogue that returns something the server-side filter should have
+// excluded. fakeImageClient deliberately honours the filter, so this is the only way to
+// reach the mismatch.
+type unfilteredImages struct{ img *hcloud.Image }
+
+func (u unfilteredImages) AllWithOpts(_ context.Context, _ hcloud.ImageListOpts) ([]*hcloud.Image, error) {
+	return []*hcloud.Image{u.img}, nil
+}
+
+// TestCreate_LiveImageWrongArchIsRejected verifies that the live image lookup -- the
+// path taken when status carries no entry for the architecture -- refuses an image whose
+// architecture does not match the one the NodeClaim requires, instead of launching it.
+// Such a node boots and then fails every workload with "exec format error". The check
+// has to live on this path: an entry read from status reports the architecture it was
+// filed under, so comparing it against that same architecture in Create can never fail
+// (the nodeclass controller verifies status entries at write time instead).
+func TestCreate_LiveImageWrongArchIsRejected(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := baselineNodeClass() // no status.resolvedImages: forces the live lookup
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(nc).Build()
+	fsc := &fakeServerClient{servers: map[int64]*hcloud.Server{}}
+	cp := cloudprovider.NewCloudProvider(kube,
+		instance.NewProvider(fsc, "test-cluster"),
+		instancetype.NewProvider(&fakeServerTypeClient{types: []*hcloud.ServerType{armType("cax31", "0.0100")}}),
+		imagefamily.NewProvider(unfilteredImages{
+			img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04", Architecture: hcloud.ArchitectureX86},
+		}))
+
+	_, err := cp.Create(context.Background(), createNodeClaim())
+	if err == nil {
+		t.Fatal("launched an arm64 node from an x86 image")
+	}
+	if fsc.lastOpts.ServerType != nil {
+		t.Errorf("a server was created despite the architecture mismatch: %+v", fsc.lastOpts.ServerType)
+	}
+	if !karpcp.IsNodeClassNotReadyError(err) {
+		t.Errorf("want NodeClassNotReadyError so core deletes the claim, got %T: %v", err, err)
+	}
+}
+
+// selectionSkippedCount reads the current value of
+// karpenter_hetzner_instance_type_selection_skipped_total for one arch/reason pair.
+// Tests compare deltas, since the registry is process-global and other tests launch too.
+func selectionSkippedCount(t *testing.T, arch, reason string) float64 {
+	t.Helper()
+	families, err := crmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gathering metrics: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != "karpenter_hetzner_instance_type_selection_skipped_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["arch"] == arch && labels["reason"] == reason {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// TestCreate_CountsSkippedArchOncePerLaunch verifies that the skipped-selection counter
+// tracks launches, not catalogue size. Incrementing inside the selection loop made a
+// single launch add one per ARM type hcloud publishes, so the rate scaled with the
+// catalogue and could not be compared across clusters or read as "how often are we
+// routing around a missing image" -- which is what docs/talos-bootstrap.md tells
+// operators to alert on.
+func TestCreate_CountsSkippedArchOncePerLaunch(t *testing.T) {
+	nc := baselineNodeClass()
+	withResolvedImages(nc, apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 42})
+	// Three ARM types are skipped for the one missing image; the counter must move by 1.
+	types := []*hcloud.ServerType{
+		armType("cax11", "0.0100"), armType("cax21", "0.0110"), armType("cax31", "0.0120"),
+		hourlyType("cx43", 8, 16, "0.0260"),
+	}
+	cp, fsc, _ := buildCPWithTypes(t, nc, types)
+
+	before := selectionSkippedCount(t, string(hcloud.ArchitectureARM), "no_resolved_image")
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := fsc.lastOpts.ServerType.Name; got != "cx43" {
+		t.Fatalf("expected the launch to fall through to cx43, got %q", got)
+	}
+	if delta := selectionSkippedCount(t, string(hcloud.ArchitectureARM), "no_resolved_image") - before; delta != 1 {
+		t.Errorf("counter moved by %v for one launch that skipped 3 arm types, want 1", delta)
+	}
+}
+
+// TestCreate_IgnoresStaleGenerationResolvedImage verifies that image IDs recorded under
+// an earlier spec generation are not launched. The nodeclass controller clears them the
+// next time it reconciles, but nothing makes core wait for that: its NodeClass readiness
+// gate compares no observedGeneration, so a NodeClass whose imageSelector was just
+// repinned still reads Ready=True -- and stays that way indefinitely if the nodeclass
+// controller is wedged. Reading status unconditionally would boot the pre-edit image
+// while every condition is green; a stale entry must fall back to a live lookup against
+// the current selector, which is what Create did before status was consulted at all.
+func TestCreate_IgnoresStaleGenerationResolvedImage(t *testing.T) {
+	// Resolved under generation 1, exactly as a successful pass would stamp it...
+	nc := withResolvedImages(baselineNodeClass(),
+		apiv1.ResolvedImage{Architecture: string(hcloud.ArchitectureX86), ImageID: 99})
+	// ...then the operator edits the spec, so image 99 answers a question no longer asked.
+	nc.Generation = 2
+
+	cp, fsc, _ := buildCPWithTypes(t, nc, []*hcloud.ServerType{cx22Type()})
+
+	if _, err := cp.Create(context.Background(), createNodeClaim()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if fsc.lastOpts.Image == nil {
+		t.Fatal("no image recorded on create")
+	}
+	if got := fsc.lastOpts.Image.ID; got != 42 {
+		t.Errorf("launched image %d, want 42 from a live lookup (99 means the pre-edit status entry won)", got)
 	}
 }

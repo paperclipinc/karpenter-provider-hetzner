@@ -2,6 +2,7 @@ package instancetype
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,7 +43,12 @@ func NewProvider(client ServerTypeClient) *Provider {
 		client: client,
 		unavailable: newUnavailableCache(
 			// 5m: long enough to route around a saturated location, short enough to
-			// retry it soon. TODO: make configurable via operator config if needed.
+			// retry it soon. Matches observed recovery -- a resource_unavailable on
+			// (cx43, hel1) cleared within minutes, an identical create succeeding ~70s
+			// later. A long quarantine would keep falling through to a ~4x-priced type
+			// well after capacity returned, so if this is ever tuned, prefer a short base
+			// with backoff on repeat failures over a longer flat TTL.
+			// TODO: make configurable via operator config if needed.
 			5 * time.Minute,
 		),
 	}
@@ -113,7 +119,9 @@ func (p *Provider) applyAvailability(types []*cloudprovider.InstanceType) []*clo
 		for j, o := range it.Offerings {
 			zone := o.Requirements.Get(corev1.LabelTopologyZone).Any()
 			cp := *o
-			cp.Available = !p.unavailable.isUnavailable(it.Name, zone)
+			// AND, never overwrite: o.Available already encodes catalogue facts (unpriced
+			// or withdrawn by hcloud) that the capacity cache knows nothing about.
+			cp.Available = o.Available && !p.unavailable.isUnavailable(it.Name, zone)
 			offerings[j] = &cp
 		}
 		// Construct a fresh InstanceType (rather than copying *it) to avoid
@@ -139,20 +147,50 @@ func toInstanceType(st *hcloud.ServerType) *cloudprovider.InstanceType {
 
 	cpuType := string(st.CPUType) // "shared" or "dedicated"
 
-	// Build offerings: one per pricing location.
+	// Build offerings: one per pricing location. Every priced location stays in the
+	// catalogue even when it cannot be launched -- karpenter core documents that Offerings
+	// must list all allowed offerings "even if they're temporarily unavailable", and
+	// treats a running node whose offering has disappeared as drifted, replacing healthy
+	// nodes. Availability, not membership, is what keeps an offering out of selection.
+	//
+	// Availability is NOT gated on ServerType.Locations[].Available. That flag is wrong in
+	// BOTH directions, so no reading of it is safe:
+	//
+	//   false negatives -- observed reading false for (cx53, nbg1) 50 minutes after the
+	//   API accepted a cx53 create there, for (cx53, fsn1) while a cx53 was created in
+	//   fsn1, and across all three eu-central locations while eight cx53 nodes ran.
+	//
+	//   false positives -- hcloud datacenter describe hel1-dc2 listed cx43 in both
+	//   server_types.available and available_for_migration, and the create was still
+	//   rejected with resource_unavailable; an identical request minutes later succeeded.
+	//
+	// It carries no signal about whether a server can be created, so gating on it
+	// proactively is unsound whichever way it is interpreted. Excluding those offerings
+	// drops them out of ranking entirely, so a 32Gi pod falls through cx53 (EUR 29.49) to
+	// cpx62 (EUR 129.99) -- a 4.4x regression from the change meant to prevent exactly
+	// that. Withdrawn pairs are handled reactively by the unavailable cache, which marks
+	// a pair only after a real create failure and so cannot be fooled in either
+	// direction.
 	offerings := make(cloudprovider.Offerings, 0, len(st.Pricings))
 	for _, p := range st.Pricings {
 		if p.Location == nil {
 			continue
 		}
-		price := hourlyNetPrice(p)
+		// An unpriced offering cannot be ranked, so it is unavailable rather than priced
+		// at 0 -- a 0 sorts as the best deal in the cluster and would win every selection.
+		price, priced := hourlyNetPrice(p)
 		offerings = append(offerings, &cloudprovider.Offering{
 			Requirements: scheduling.NewRequirements(
 				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
 				scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, p.Location.Name),
 			),
+			// Price stays 0 when unparseable. Selection is protected by Available, but
+			// core reads a RUNNING node's price via Compatible(...).Cheapest() with no
+			// Available filter, so a 0 here makes that node look free and blocks its
+			// replacement-consolidation until pricing recovers. No representable value
+			// avoids core's 0-fallback; the exposure is bounded by the pricing outage.
 			Price:     price,
-			Available: true,
+			Available: priced,
 		})
 	}
 
@@ -209,15 +247,20 @@ func serverFamily(name string) string {
 // clusters drop the IPv4 charge with HCloudNodeClass.spec.enablePublicIPv4=false.
 //
 // hourlyNetPrice returns the net hourly price for a server-type pricing entry,
-// preferring the explicit hourly figure and falling back to monthly/730.
-func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) float64 {
-	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Hourly.Net), 64); err == nil && v > 0 {
-		return v
+// preferring the explicit hourly figure and falling back to monthly/730. ok is false
+// when neither figure yields a usable price; callers must drop the offering rather
+// than substitute a default, because a zero price ranks as the best deal in the
+// cluster and would win every selection.
+func hourlyNetPrice(p hcloud.ServerTypeLocationPricing) (price float64, ok bool) {
+	// ParseFloat accepts "inf"/"NaN", and an infinite price would sort last forever
+	// rather than being recognised as unusable, so require a finite positive figure.
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Hourly.Net), 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+		return v, true
 	}
-	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Monthly.Net), 64); err == nil {
-		return v / 730
+	if v, err := strconv.ParseFloat(strings.TrimSpace(p.Monthly.Net), 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+		return v / 730, true
 	}
-	return 0
+	return 0, false
 }
 
 // filterByLocations returns only the instance types that have at least one offering in the requested locations.

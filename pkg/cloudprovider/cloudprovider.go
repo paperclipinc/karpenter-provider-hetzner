@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/awslabs/operatorpkg/status"
@@ -11,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -85,6 +87,69 @@ func (cp *CloudProvider) RepairPolicies() []karpcp.RepairPolicy {
 	}
 }
 
+// hcloudArchFor maps an instance type's kubernetes.io/arch value onto the hcloud
+// architecture used for image lookups.
+func hcloudArchFor(it *karpcp.InstanceType) hcloud.Architecture {
+	if it.Requirements.Get(corev1.LabelArchStable).Any() == "arm64" {
+		return hcloud.ArchitectureARM
+	}
+	return hcloud.ArchitectureX86
+}
+
+// resolveImage returns the image to launch for arch, preferring the ID the nodeclass
+// controller published in status for the CURRENT spec generation. It falls back to a
+// live lookup only when status has no such entry -- the not-yet-reconciled case, which
+// the selection gate also lets through, and which includes a spec edit that status has
+// not caught up with (see CurrentResolvedImages).
+//
+// A definitive miss from that fallback is returned as NodeClassNotReadyError so core
+// deletes the NodeClaim. A bare error would land in launch.go's default branch, parking
+// the claim at Launched=Unknown and requeuing it indefinitely. Errors that merely mean
+// the catalogue was unreadable stay untyped and retryable.
+func (cp *CloudProvider) resolveImage(ctx context.Context, nodeClass *apiv1.HCloudNodeClass, arch hcloud.Architecture) (*hcloud.Image, error) {
+	for _, ri := range nodeClass.CurrentResolvedImages() {
+		if ri.Architecture == string(arch) {
+			return &hcloud.Image{ID: ri.ImageID, Architecture: arch}, nil
+		}
+	}
+	image, err := cp.imageProvider.Resolve(ctx, nodeClass.Spec.ImageSelector, arch)
+	if err != nil {
+		if imagefamily.IsPermanent(err) {
+			return nil, karpcp.NewNodeClassNotReadyError(
+				fmt.Errorf("HCloudNodeClass %q has no image for architecture %s: %w", nodeClass.Name, arch, err))
+		}
+		return nil, fmt.Errorf("resolving image: %w", err)
+	}
+	// Never provision a server whose image architecture diverges from the architecture the
+	// NodeClaim requires: such a node boots and then fails every workload with "exec
+	// format error". This is the only place the check can bite -- entries read from status
+	// above carry the architecture they were filed under, and the nodeclass controller
+	// verifies that against the image before recording it (see resolveImages).
+	if image.Architecture != arch {
+		return nil, karpcp.NewNodeClassNotReadyError(fmt.Errorf(
+			"HCloudNodeClass %q resolved image %d with architecture %q for architecture %s",
+			nodeClass.Name, image.ID, image.Architecture, arch))
+	}
+	return image, nil
+}
+
+// hasResolvedImage reports whether the NodeClass resolved an image for arch under the
+// current spec generation. An empty list means the nodeclass controller has not reported
+// on this spec yet, so every architecture stays eligible: filtering on absent status
+// would block provisioning entirely.
+func hasResolvedImage(nodeClass *apiv1.HCloudNodeClass, arch hcloud.Architecture) bool {
+	resolved := nodeClass.CurrentResolvedImages()
+	if len(resolved) == 0 {
+		return true
+	}
+	for _, ri := range resolved {
+		if ri.Architecture == string(arch) {
+			return true
+		}
+	}
+	return false
+}
+
 // Create provisions a new Hetzner server for the given NodeClaim.
 func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim) (*karpv1.NodeClaim, error) {
 	log := logf.FromContext(ctx)
@@ -94,6 +159,14 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 	}
 
 	// Get instance types for the node class locations.
+	//
+	// NOTE: this reads the provider's own catalogue. When the NodeOverlay feature gate is
+	// enabled, cmd/controller wraps this provider in karpenter's overlay.Decorate, which
+	// overrides GetInstanceTypes but inherits Create unchanged -- so core ranks types on
+	// overlaid prices while the selection below ranks on raw hcloud prices, and the two
+	// can disagree. The gate defaults off. This is closable here rather than upstream:
+	// Create needs the nodeoverlay store, not the decorator, and the store is public and
+	// already held in main.go. Left to a follow-up to keep this change reviewable.
 	instanceTypes, err := cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
 	if err != nil {
 		return nil, fmt.Errorf("listing instance types: %w", err)
@@ -101,50 +174,99 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 
 	// Filter instance types by NodeClaim requirements.
 	reqs := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
+	// offering is the one selected was ranked on, and therefore the one it is launched
+	// into: deriving both from a single expression keeps the price we chose on and the
+	// price we pay identical.
 	var selected *karpcp.InstanceType
+	var offering *karpcp.Offering
+	// Distinguish the two ways selection can come up empty. A missing image is a
+	// NodeClass configuration problem that no retry fixes; no available offering is
+	// transient capacity. They need different errors, and core retries them differently.
+	archsMissingImages := sets.New[string]()
+	capacityBlocked := false
+	// Explicit min-scan rather than core's OrderByPrice: that helper sorts with the
+	// unstable sort.Slice and defines no tiebreak, so types tied on price come out in an
+	// order that shifts when an unrelated type is added or an offering's availability
+	// flips -- two NodeClaims from one NodePool could land on different shapes. Ties break
+	// on name here, so selection is reproducible from the same catalogue. Scanning also
+	// avoids re-deriving every type's price inside a sort comparator.
 	for _, it := range instanceTypes {
 		if !reqs.IsCompatible(it.Requirements, scheduling.AllowUndefinedWellKnownLabels) {
 			continue
 		}
-		if !it.Offerings.Available().HasCompatible(reqs) {
+		// Skip architectures the NodeClass has no image for. The image is resolved once,
+		// after this loop has picked a winner, so a miss there is terminal: nothing
+		// demotes the type or marks it unavailable, and core requeues the same candidate
+		// forever. Cheapest-first
+		// makes that reachable whenever a pool permits both architectures and the ARM
+		// candidate prices lower, while a single-arch cluster is explicitly supported
+		// (see resolveImages).
+		if arch := hcloudArchFor(it); !hasResolvedImage(nodeClass, arch) {
+			archsMissingImages.Insert(string(arch))
+			log.V(1).Info("skipping instance type: node class has no resolved image",
+				"instanceType", it.Name, "arch", string(arch), "nodeClass", nodeClass.Name)
 			continue
 		}
-		selected = it
-		break
+		cheapest := it.Offerings.Available().Compatible(reqs).Cheapest()
+		if cheapest == nil {
+			capacityBlocked = true
+			continue
+		}
+		if selected == nil || cheapest.Price < offering.Price ||
+			(cheapest.Price == offering.Price && it.Name < selected.Name) {
+			selected, offering = it, cheapest
+		}
+	}
+	// Counted once per architecture per launch, not once per skipped type: incrementing
+	// inside the loop above would scale the counter with the size of the hcloud catalogue
+	// rather than with the number of launches that had to route around a missing image,
+	// which is the thing worth alerting on. Usually non-terminal -- a cheaper candidate is
+	// dropped and a pricier one launches, so the error below never fires and nothing else
+	// would show that a mislabelled image is quietly costing money.
+	for _, arch := range sets.List(archsMissingImages) {
+		metrics.RecordSelectionSkipped(arch, "no_resolved_image")
 	}
 	if selected == nil {
+		// Only claim capacity when a candidate cleared the image gate and still had no
+		// offering. Otherwise the image is the whole story, and dressing it as capacity
+		// sends operators to their Hetzner quotas for a problem in the NodeClass.
+		if archsMissingImages.Len() > 0 && !capacityBlocked {
+			// NodeClassNotReady, not a bare error: core switches on the type in launch.go.
+			// Both this and InsufficientCapacity delete the NodeClaim so the scheduler can
+			// try another shape; anything else parks it in Launched=Unknown and requeues
+			// forever. This branch also reports reason=nodeclass_not_ready rather than
+			// blaming capacity.
+			return nil, karpcp.NewNodeClassNotReadyError(fmt.Errorf(
+				"no instance type satisfies requirements for nodeclaim %s: HCloudNodeClass %q has no resolved image for architecture %s",
+				nodeClaim.Name, nodeClass.Name, strings.Join(sets.List(archsMissingImages), ", ")))
+		}
 		return nil, karpcp.NewInsufficientCapacityError(fmt.Errorf("no instance type satisfies requirements for nodeclaim %s", nodeClaim.Name))
 	}
 
 	// Determine architecture from the selected instance type.
 	arch := selected.Requirements.Get(corev1.LabelArchStable).Any()
-	hcloudArch := hcloud.ArchitectureX86
-	if arch == "arm64" {
-		hcloudArch = hcloud.ArchitectureARM
-	}
+	hcloudArch := hcloudArchFor(selected)
 	log.Info("selected instance type", "instanceType", selected.Name, "arch", arch)
 
-	// Resolve OS image.
-	image, err := cp.imageProvider.Resolve(ctx, nodeClass.Spec.ImageSelector, hcloudArch)
+	// Resolve OS image. Prefer the ID the nodeclass controller already published: the
+	// selection gate above admitted this architecture on the strength of that entry, so
+	// reading it here keeps gate and launch on one source. A second, live lookup can
+	// disagree with the gate -- or fail after a candidate has already been chosen, which
+	// is unrecoverable because selection is deterministic and re-picks the same type.
+	//
+	// The wrong-arch guard lives inside resolveImage and in the nodeclass controller,
+	// which are the two places an image and an architecture are actually paired up.
+	// Re-checking it here would compare the architecture against itself: on the status
+	// path resolveImage reports the architecture the entry was filed under, not one read
+	// back from hcloud.
+	image, err := cp.resolveImage(ctx, nodeClass, hcloudArch)
 	if err != nil {
-		return nil, fmt.Errorf("resolving image: %w", err)
-	}
-	// Guard: never provision a server whose image architecture diverges from the
-	// architecture the NodeClaim requires. Fail loudly instead of booting a
-	// wrong-arch node that would silently fail to run scheduled workloads.
-	if image.Architecture != hcloudArch {
-		return nil, fmt.Errorf("resolved image %d has arch %q but nodeclaim requires %q", image.ID, image.Architecture, hcloudArch)
+		return nil, err
 	}
 
-	// Pick the first compatible offering to determine the location.
-	var location string
-	compatibleOfferings := selected.Offerings.Available().Compatible(reqs)
-	if len(compatibleOfferings) > 0 {
-		location = compatibleOfferings[0].Requirements.Get(corev1.LabelTopologyZone).Any()
-	}
-	if location == "" && len(nodeClass.Spec.Locations) > 0 {
-		location = nodeClass.Spec.Locations[0]
-	}
+	// Launch in the offering's location: the type was ranked by that offering's price, so
+	// launching anywhere else can bill a multiple of the price it was chosen on.
+	location := offering.Zone()
 
 	// Collect node pool name from NodeClaim labels (may be empty).
 	nodePoolName := nodeClaim.Labels[karpv1.NodePoolLabelKey]
@@ -186,11 +308,11 @@ func (cp *CloudProvider) Create(ctx context.Context, nodeClaim *karpv1.NodeClaim
 			labels[key] = req.Values()[0]
 		}
 	}
-	// Overlay offering-specific labels (zone, capacity-type).
-	if len(compatibleOfferings) > 0 {
-		for _, req := range compatibleOfferings[0].Requirements {
-			labels[req.Key] = req.Any()
-		}
+	// Overlay offering-specific labels (zone, capacity-type) from the offering the server
+	// was launched into, so the zone label always matches where the server actually is:
+	// karpenter core resolves a node's offering by that label to price it for consolidation.
+	for _, req := range offering.Requirements {
+		labels[req.Key] = req.Any()
 	}
 	// Merge existing NodeClaim labels.
 	for k, v := range nodeClaim.Labels {
@@ -251,7 +373,35 @@ func (cp *CloudProvider) GetInstanceTypes(ctx context.Context, nodePool *karpv1.
 		return nil, fmt.Errorf("resolving node class for node pool %s: %w", nodePool.Name, err)
 	}
 
-	return cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
+	its, err := cp.typeProvider.List(ctx, nodeClass.Spec.Locations)
+	if err != nil {
+		return nil, err
+	}
+	return markImagelessArchesUnavailable(its, nodeClass), nil
+}
+
+// markImagelessArchesUnavailable drops availability -- but not membership -- for every
+// instance type whose architecture the NodeClass has no image for.
+//
+// Availability and membership serve different consumers. The scheduler requires an
+// available compatible offering, so this stops core scheduling onto an architecture
+// Create would refuse; without it core creates a NodeClaim, Create rejects it, core
+// deletes it, and the next cycle recreates the identical claim indefinitely with no
+// backoff. Drift checks Offerings.HasCompatible with no Available() filter, so keeping
+// the offering listed means running nodes of that type are not drifted and replaced.
+//
+// The offerings returned by List are fresh value-copies (see applyAvailability), so
+// clearing Available here cannot reach the provider's cached catalogue.
+func markImagelessArchesUnavailable(its []*karpcp.InstanceType, nodeClass *apiv1.HCloudNodeClass) []*karpcp.InstanceType {
+	for _, it := range its {
+		if hasResolvedImage(nodeClass, hcloudArchFor(it)) {
+			continue
+		}
+		for _, o := range it.Offerings {
+			o.Available = false
+		}
+	}
+	return its
 }
 
 // IsDrifted determines whether the given NodeClaim has drifted from its desired state.
