@@ -2,8 +2,8 @@ apiVersion: v2
 name: karpenter-provider-hetzner
 description: Karpenter cloud provider for Hetzner Cloud
 type: application
-version: 2.1.1
-appVersion: "2.1.1"
+version: 2.2.0
+appVersion: "2.2.0"
 # home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
 home: https://paperclip.inc/karpenter-hetzner
@@ -29,11 +29,17 @@ annotations:
     - name: k3s bootstrap guide
       url: https://github.com/paperclipinc/karpenter-provider-hetzner/blob/main/docs/k3s-bootstrap.md
   artifacthub.io/category: integration-delivery
-  artifacthub.io/containsSecurityUpdates: "true"
+  artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
-    - kind: fixed
-      description: "RBAC grants event create/patch on events.k8s.io alongside the legacy core group, so the controller can emit events through the modern recorder"
-    - kind: security
-      description: "Operator image rebuilt with Go 1.26.7, clearing five stdlib vulnerabilities (GO-2026-6218, GO-2026-6090, GO-2026-6089, GO-2026-5972, GO-2026-5026)"
     - kind: changed
-      description: "Dependency bumps: sigs.k8s.io/karpenter 1.14.1, hcloud-go 2.47.0, k8s.io libraries 0.36.4"
+      description: "Instance-type selection is cheapest-first: Create launches the cheapest compatible offering and in that offering's location, instead of the first type the hcloud API returned (which bought CPX where CX fit at 3-4x the price)"
+    - kind: changed
+      description: "NodePools that do not constrain kubernetes.io/arch may now receive arm64 (CAX) nodes where they price lower; pin kubernetes.io/arch to amd64 to keep the previous behaviour"
+    - kind: fixed
+      description: "Create no longer dead-ends on an instance type whose architecture the HCloudNodeClass has no image for; such types are skipped and advertised unavailable, and a total miss reports NodeClassNotReady instead of InsufficientCapacity"
+    - kind: fixed
+      description: "Image resolution distinguishes a missing image from an unreadable catalogue; transient hcloud errors keep the last resolved image instead of clearing status, and wrong-architecture images are rejected before being recorded"
+    - kind: fixed
+      description: "Unpriced offerings are marked unavailable rather than priced at zero, and price ties break deterministically on type name"
+    - kind: added
+      description: "Metrics karpenter_hetzner_image_resolution_errors_total and karpenter_hetzner_instance_type_selection_skipped_total{arch,reason}"
