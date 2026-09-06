@@ -5,23 +5,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: karpenter-provider-hetzner
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas | int }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: karpenter-provider-hetzner
+      {{- include "karpenter-hetzner.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: karpenter-provider-hetzner
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "karpenter-hetzner.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ include "karpenter-hetzner.serviceAccountName" . }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . | quote }}
       {{- end }}

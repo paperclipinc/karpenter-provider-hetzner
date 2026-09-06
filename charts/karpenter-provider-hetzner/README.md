@@ -32,11 +32,61 @@ kubectl apply -f your-nodeclasses-v1.yaml
 Existing `v1alpha1` objects are not migrated automatically; recreate them under
 `v1` (the spec is unchanged — only the `apiVersion` differs).
 
+## Upgrading to chart 3.0.0
+
+Resource names and label selectors are now scoped to the Helm release. Before
+3.0.0 every object carried the hardcoded name `karpenter-provider-hetzner` and
+every selector matched only `app.kubernetes.io/name`, so a second release in the
+same namespace could not be installed at all, and two cluster-scoped RBAC
+objects of the same name collided even across namespaces.
+
+**A `helm upgrade` from 2.x fails without a manual step.** A Deployment's
+`.spec.selector` is immutable, and this release adds `app.kubernetes.io/instance`
+to it:
+
+```
+Error: UPGRADE FAILED: cannot patch "karpenter-provider-hetzner" with kind Deployment:
+Deployment.apps "karpenter-provider-hetzner" is invalid:
+spec.selector: Invalid value: ...: field is immutable
+```
+
+Delete the Deployment first, keeping its pods running while you do, then upgrade:
+
+```bash
+kubectl delete deployment karpenter-provider-hetzner -n <namespace> --cascade=orphan
+helm upgrade <release> oci://ghcr.io/paperclipinc/charts/karpenter-provider-hetzner --version 3.0.0 --reuse-values
+kubectl delete pod -n <namespace> -l app.kubernetes.io/name=karpenter-provider-hetzner \
+  --field-selector status.phase=Running --ignore-not-found  # orphaned old pods
+```
+
+`--cascade=orphan` leaves the controller running through the swap. The orphaned
+pods are not adopted by the new ReplicaSet (their labels lack the instance
+label), so delete them once the new pod is `Ready`. Karpenter tolerates the
+controller being absent for the length of a rollout; nothing is provisioned or
+disrupted while no replica holds the lease.
+
+Two other names change unless you pin them:
+
+- **ServiceAccount**: was `karpenter`, now the release-scoped name. That old
+  default is also what the upstream karpenter chart creates, so the two charts
+  in one namespace silently shared one ServiceAccount. Set
+  `serviceAccount.name=karpenter` to keep it.
+- **ClusterRole / ClusterRoleBinding**: now suffixed with the release namespace.
+  Helm creates the new pair and removes the old one; no manual step.
+
+If your release is *not* named `karpenter-provider-hetzner`, namespaced object
+names gain a `<release>-` prefix. Set
+`fullnameOverride=karpenter-provider-hetzner` to keep the old names. A release
+named after the chart (the documented install) keeps every namespaced name
+unchanged.
+
 ## Values
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `clusterName` | `""` (required) | Scopes which servers the controller manages |
+| `nameOverride` | `""` | Replaces the chart name in generated names and `app.kubernetes.io/name` |
+| `fullnameOverride` | `""` | Replaces the generated resource name outright |
 | `replicas` | `1` | Controller replicas |
 | `image.repository` | `ghcr.io/paperclipinc/karpenter-provider-hetzner` | Image |
 | `image.tag` | `""` | Empty tracks the chart appVersion; pin a tag in production |
@@ -45,7 +95,7 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 | `auth.secretRef.key` | `token` | Key within the secret |
 | `hcloud.apiTimeout` | `30s` | Bounds a single hcloud HTTP request (Go duration, max `5m`). Per request, not per operation |
 | `serviceAccount.create` | `true` | Create the service account |
-| `serviceAccount.name` | `karpenter` | Service account name |
+| `serviceAccount.name` | `""` (release-scoped name) | Service account name |
 | `metrics.port` | `8080` | Prometheus metrics port |
 | `healthProbe.port` | `8081` | Health/readiness probe port |
 | `resources` | see values.yaml | Container resources |

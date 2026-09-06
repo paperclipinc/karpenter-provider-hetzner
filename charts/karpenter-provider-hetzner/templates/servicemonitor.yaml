@@ -2,18 +2,17 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: karpenter-provider-hetzner
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
     {{- with .Values.serviceMonitor.additionalLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: karpenter-provider-hetzner
+      {{- include "karpenter-hetzner.selectorLabels" . | nindent 6 }}
   endpoints:
     - port: http-metrics
       interval: {{ .Values.serviceMonitor.interval }}

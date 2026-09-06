@@ -17,11 +17,10 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: karpenter-provider-hetzner
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
 spec:
   {{- if $hasMin }}
   minAvailable: {{ $pdb.minAvailable | int }}
@@ -32,5 +31,5 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: karpenter-provider-hetzner
+      {{- include "karpenter-hetzner.selectorLabels" . | nindent 6 }}
 {{- end }}

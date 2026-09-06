@@ -1,7 +1,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.clusterRoleName" . }}
+  labels:
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
 rules:
   # Karpenter core CRDs.
   - apiGroups: ["karpenter.sh"]
@@ -51,12 +53,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.clusterRoleName" . }}
+  labels:
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: karpenter-provider-hetzner
+  name: {{ include "karpenter-hetzner.clusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ .Values.serviceAccount.name }}
+    name: {{ include "karpenter-hetzner.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
