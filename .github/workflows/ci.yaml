@@ -47,6 +47,49 @@ jobs:
           go-version-file: go.mod
       - run: go test -race -count=1 ./pkg/controllers/...
 
+  # The chart had no CI at all until a release-scoping bug (#73) shipped in it.
+  # These renders are cheap and catch the whole class of failure that reaches
+  # users as a failed `helm install`: a template that does not parse, a values
+  # shape that hard-errors, and a Deployment whose selector does not match the
+  # pods it templates.
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/karpenter-provider-hetzner --set clusterName=ci
+      - name: Render the documented install
+        run: |
+          helm template karpenter-provider-hetzner charts/karpenter-provider-hetzner \
+            --set clusterName=ci > /tmp/default.yaml
+      - name: Render every optional resource
+        run: |
+          helm template karpenter-provider-hetzner charts/karpenter-provider-hetzner \
+            --set clusterName=ci --set replicas=2 \
+            --set serviceMonitor.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=1 > /dev/null
+      - name: Two releases in one namespace must not share a selector
+        run: |
+          set -euo pipefail
+          for r in ci-a ci-b; do
+            helm template "$r" charts/karpenter-provider-hetzner \
+              --namespace shared --set clusterName="$r" > "/tmp/$r.yaml"
+          done
+          # Every selector must name its own release. If the instance label were
+          # dropped again, both files would carry the same selector block and the
+          # two Deployments would fight over each other's pods.
+          grep -q 'app.kubernetes.io/instance: ci-a' /tmp/ci-a.yaml
+          grep -q 'app.kubernetes.io/instance: ci-b' /tmp/ci-b.yaml
+          if grep -q 'app.kubernetes.io/instance: ci-b' /tmp/ci-a.yaml; then
+            echo "release ci-a renders ci-b's instance label" >&2; exit 1
+          fi
+          # Resource names must differ too: Helm refuses to adopt an object owned
+          # by another release, so identical names fail before selectors matter.
+          if diff <(grep '^  name:' /tmp/ci-a.yaml) <(grep '^  name:' /tmp/ci-b.yaml) > /dev/null; then
+            echo "both releases render identical resource names" >&2; exit 1
+          fi
+
   image:
     # Build + push a testable controller image for every commit on main, so
     # downstream e2e (mono cluster-ops) can install a known tag without a release.

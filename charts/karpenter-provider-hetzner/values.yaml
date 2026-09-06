@@ -1,3 +1,10 @@
+# nameOverride replaces the chart name used to build resource names and the
+# app.kubernetes.io/name label. fullnameOverride replaces the generated resource
+# name outright -- set it to "karpenter-provider-hetzner" to keep the names used
+# by chart releases before 3.0.0 if your release is not named that already.
+nameOverride: ""
+fullnameOverride: ""
+
 replicas: 1
 
 image:
@@ -24,7 +31,12 @@ hcloud:
 
 serviceAccount:
   create: true
-  name: karpenter
+  # Empty means the release-scoped generated name. Before 3.0.0 this defaulted to
+  # "karpenter", which is also what the upstream karpenter chart creates -- so the
+  # two charts in one namespace silently shared a ServiceAccount and one
+  # release's uninstall revoked the other's access. Set it explicitly to bind to
+  # a ServiceAccount you manage yourself (with create: false).
+  name: ""
 
 resources:
   requests:

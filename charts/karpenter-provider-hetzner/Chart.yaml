@@ -2,8 +2,8 @@ apiVersion: v2
 name: karpenter-provider-hetzner
 description: Karpenter cloud provider for Hetzner Cloud
 type: application
-version: 2.2.0
-appVersion: "2.2.0"
+version: 3.0.0
+appVersion: "3.0.0"
 # home points at Paperclip.inc (the project's canonical page) so listing
 # "Homepage" links drive backlinks to the domain; GitHub stays as source.
 home: https://paperclip.inc/karpenter-hetzner
@@ -32,14 +32,12 @@ annotations:
   artifacthub.io/containsSecurityUpdates: "false"
   artifacthub.io/changes: |
     - kind: changed
-      description: "Instance-type selection is cheapest-first: Create launches the cheapest compatible offering and in that offering's location, instead of the first type the hcloud API returned (which bought CPX where CX fit at 3-4x the price)"
+      description: "BREAKING: resource names and label selectors are scoped to the Helm release. Upgrading from 2.x requires deleting the existing Deployment (its .spec.selector is immutable) -- see the chart README's Upgrading section"
+    - kind: fixed
+      description: "Two releases in one namespace no longer collide: names are release-scoped and every selector carries app.kubernetes.io/instance, so each Deployment, Service, PDB and ServiceMonitor sees only its own release's pods"
+    - kind: fixed
+      description: "Cluster-scoped ClusterRole/ClusterRoleBinding names include the release namespace, so two releases in different namespaces no longer collide on them"
     - kind: changed
-      description: "NodePools that do not constrain kubernetes.io/arch may now receive arm64 (CAX) nodes where they price lower; pin kubernetes.io/arch to amd64 to keep the previous behaviour"
-    - kind: fixed
-      description: "Create no longer dead-ends on an instance type whose architecture the HCloudNodeClass has no image for; such types are skipped and advertised unavailable, and a total miss reports NodeClassNotReady instead of InsufficientCapacity"
-    - kind: fixed
-      description: "Image resolution distinguishes a missing image from an unreadable catalogue; transient hcloud errors keep the last resolved image instead of clearing status, and wrong-architecture images are rejected before being recorded"
-    - kind: fixed
-      description: "Unpriced offerings are marked unavailable rather than priced at zero, and price ties break deterministically on type name"
+      description: "serviceAccount.name defaults to the release-scoped name instead of \"karpenter\", which is also what the upstream karpenter chart creates"
     - kind: added
-      description: "Metrics karpenter_hetzner_image_resolution_errors_total and karpenter_hetzner_instance_type_selection_skipped_total{arch,reason}"
+      description: "nameOverride and fullnameOverride"

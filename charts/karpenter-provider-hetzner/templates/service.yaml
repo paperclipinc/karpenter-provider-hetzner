@@ -2,14 +2,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: karpenter-provider-hetzner-metrics
+  name: {{ include "karpenter-hetzner.fullname" . }}-metrics
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: karpenter-provider-hetzner
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "karpenter-hetzner.labels" . | nindent 4 }}
 spec:
   selector:
-    app.kubernetes.io/name: karpenter-provider-hetzner
+    {{- include "karpenter-hetzner.selectorLabels" . | nindent 4 }}
   ports:
     - name: http-metrics
       port: {{ .Values.metrics.port }}
