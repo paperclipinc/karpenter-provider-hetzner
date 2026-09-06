@@ -22,7 +22,12 @@
 #
 # SECURITY NOTE: the k3s token grants cluster membership.  Prefer storing the
 # cloud-init blob in a Secret and referencing it via userDataSecretRef instead
-# of committing it to git.  See docs/k3s-bootstrap.md.
+# of committing it to git.  That keeps it out of git and out of the NodeClass --
+# but NOT off the node: Hetzner serves userData from the instance metadata
+# service (169.254.169.254), readable from inside the server.  Use a scoped
+# agent token (`--agent-token` on the servers) rather than the server
+# node-token, which also permits joining as a server.  See
+# docs/k3s-bootstrap.md.
 
 apiVersion: karpenter.hetzner.cloud/v1
 kind: HCloudNodeClass
@@ -69,6 +74,15 @@ spec:
           # Let hcloud-cloud-controller-manager own node lifecycle / providerID.
           kubelet-arg:
             - "cloud-provider=external"
+          # REQUIRED by Karpenter.  Core removes this taint once it has synced
+          # the NodeClaim's labels, taints and owner references onto the Node;
+          # without it, pods can land on the node before that sync completes.
+          # A missing taint does not fail loudly -- core logs an error, emits an
+          # UnregisteredTaintMissing event, and proceeds -- so the symptom is an
+          # intermittent scheduling race, not a node that fails to join.
+          # It does NOT need to be declared in the NodePool's startupTaints.
+          node-taint:
+            - "karpenter.sh/unregistered=:NoExecute"
           # OPTIONAL: pin the kubelet/flannel to the private NIC.  Uncomment and
           # set if your cluster runs its data plane over the Hetzner network.
           # node-ip: "<PRIVATE_IP>"
