@@ -11,7 +11,41 @@ permissions:
   contents: read
 
 jobs:
+  # Two scans, because "is this vulnerable?" has two different answers depending
+  # on who is asking.
+  #
+  # On a pull request the question is whether the CHANGE introduces a vulnerable
+  # dependency. Scanning with the go.mod toolchain answers a different question
+  # badly: setup-go installs exactly the `go` directive, so any branch cut before
+  # the last Go patch bump fails on stdlib advisories that are a property of its
+  # base, not of its diff. Every open contributor PR (#53, #54, #55, #56) failed
+  # this way -- five GO-2026-* stdlib findings, all "Fixed in: go1.26.6", on
+  # branches based on 1.26.5 -- for a bump they had no way to make. Scanning a PR
+  # with the latest stable toolchain removes that noise entirely: a stdlib finding
+  # then means the newest Go is affected, which is genuinely worth a red X.
+  #
+  # On main and on the weekly schedule the question is whether what we SHIP is
+  # vulnerable, and the answer must be pinned to the toolchain we ship with. That
+  # scan is what turned five stdlib advisories into the 1.26.6 bump in #57, so it
+  # keeps the go.mod pin and keeps failing the build.
   govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          # A PR is scanned against the newest toolchain so stdlib advisories
+          # already fixed upstream cannot fail a contributor's branch.
+          go-version: stable
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # Pinned to the shipped toolchain. Runs on main and on the weekly schedule --
+  # not on pull requests, where a stale base is the contributor's problem to
+  # inherit rather than to fix.
+  govulncheck-shipped:
+    name: govulncheck (shipped toolchain)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
