@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The hcloud API client now bounds every HTTP request. `hcloud.NewClient` defaults to a bare `&http.Client{}`, which has no `Timeout`, so a connection that is accepted and never answered — a blackholed route to `api.hetzner.cloud`, a middlebox that swallows the response, a stalled TLS handshake — parked the calling goroutine forever. Every caller is a controller-runtime worker and controller-runtime imposes no per-reconcile deadline, so each hung request permanently consumed a worker while the operator kept reporting healthy. The client now carries a 30s per-request timeout plus explicit dial, TLS-handshake and response-header bounds, which also turns a hang into a `net.Error` the SDK's existing retry policy already treats as retryable (#71).
+
+### Added
+- `HCLOUD_API_TIMEOUT` (chart: `hcloud.apiTimeout`, default `30s`, max `5m`) tunes that per-request timeout. It bounds a single HTTP request, not a whole operation: the SDK's action waiter polls `/actions` in a loop of separate requests, so a server create that legitimately takes minutes is many short requests. An unparseable or out-of-range value fails startup rather than silently falling back (#71).
+
 ## [2.2.0] - 2026-09-02
 
 ### Changed

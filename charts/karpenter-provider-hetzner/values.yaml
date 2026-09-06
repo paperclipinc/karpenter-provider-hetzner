@@ -13,6 +13,15 @@ auth:
     name: hcloud-token
     key: token
 
+hcloud:
+  # apiTimeout bounds a single hcloud HTTP request (Go duration, max 5m). It is
+  # per request, not per operation: the SDK polls actions in a loop of separate
+  # requests, so a server create that legitimately takes minutes is many short
+  # requests. Without it a blackholed connection to api.hetzner.cloud parks a
+  # controller worker forever. Raise it only if you see timeouts against a
+  # healthy API.
+  apiTimeout: 30s
+
 serviceAccount:
   create: true
   name: karpenter
