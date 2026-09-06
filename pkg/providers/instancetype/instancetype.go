@@ -11,6 +11,7 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
@@ -30,11 +31,22 @@ type ServerTypeClient interface {
 type Provider struct {
 	client ServerTypeClient
 
+	// mu guards the cache fields only. It is never held across an hcloud call:
+	// the catalogue is read on every provisioning decision, and a single slow or
+	// hung API request must not be able to stall callers whose cache is warm.
 	mu          sync.RWMutex
 	cachedTypes []*cloudprovider.InstanceType
+	cachedAt    time.Time
 	cacheExpiry time.Time
 
+	// refreshMu serializes catalogue refreshes so a burst of concurrent misses
+	// makes one API call rather than N. It is deliberately a second mutex: it IS
+	// held across the API call, and readers must never contend on it.
+	refreshMu sync.Mutex
+
 	unavailable *unavailableCache
+
+	nowFn func() time.Time
 }
 
 // NewProvider creates a new instance type provider.
@@ -51,35 +63,58 @@ func NewProvider(client ServerTypeClient) *Provider {
 			// TODO: make configurable via operator config if needed.
 			5 * time.Minute,
 		),
+		nowFn: time.Now,
 	}
 }
 
 // List returns all available InstanceTypes, filtered to those with offerings in the given locations.
 // Results are cached for 6 hours.
+//
+// The hcloud call happens with no reader-visible lock held. Holding the cache
+// lock across it made every caller wait on the slowest possible hcloud request,
+// including the overwhelming majority whose cache was warm and who needed no
+// network at all: one hung request stalled all provisioning, and the failure
+// looked like Karpenter having stopped rather than like an API problem.
+//
+// Refreshes are still serialized, by a separate mutex that only refreshers take,
+// so a burst of concurrent misses makes one API call rather than one per caller.
 func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovider.InstanceType, error) {
-	p.mu.RLock()
-	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
-		cached := p.cachedTypes
-		p.mu.RUnlock()
+	if types, ok := p.freshCache(); ok {
 		metrics.RecordCacheHit()
-		return p.applyAvailability(filterByLocations(cached, locations)), nil
-	}
-	p.mu.RUnlock()
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if p.cachedTypes != nil && time.Now().Before(p.cacheExpiry) {
-		metrics.RecordCacheHit()
-		return p.applyAvailability(filterByLocations(p.cachedTypes, locations)), nil
+		return p.applyAvailability(filterByLocations(types, locations)), nil
 	}
 
-	// Cache miss: fetch fresh data from the hcloud API.
+	p.refreshMu.Lock()
+	defer p.refreshMu.Unlock()
+
+	// Another goroutine may have refreshed while this one waited for refreshMu.
+	if types, ok := p.freshCache(); ok {
+		metrics.RecordCacheHit()
+		return p.applyAvailability(filterByLocations(types, locations)), nil
+	}
+
 	metrics.RecordCacheMiss()
 
 	serverTypes, err := p.client.All(ctx)
 	if err != nil {
+		// Serve the expired catalogue rather than failing. Hetzner's server-type
+		// catalogue changes on the order of years -- a six-hour-old copy is not
+		// meaningfully less correct than a fresh one -- while returning an error
+		// here fails Create and GetInstanceTypes, which stops the cluster
+		// provisioning at all. A transient 5xx should not be able to do that.
+		//
+		// The expiry is deliberately NOT extended, so the next call retries the API
+		// instead of settling into the stale copy, and the staleness is counted so
+		// "serving stale" is alertable rather than silent. Availability is unaffected
+		// either way: it is computed live from the unavailable cache on every call
+		// (see applyAvailability), never baked into the catalogue.
+		if stale, age, ok := p.staleCache(); ok {
+			metrics.RecordCacheStale()
+			logf.FromContext(ctx).Error(err, "hcloud server-type catalogue unreadable; serving the last one fetched",
+				"age", age.Round(time.Second).String())
+			return p.applyAvailability(filterByLocations(stale, locations)), nil
+		}
+		// Nothing was ever fetched, so there is nothing to fall back to.
 		return nil, err
 	}
 
@@ -87,11 +122,39 @@ func (p *Provider) List(ctx context.Context, locations []string) ([]*cloudprovid
 	for _, st := range serverTypes {
 		types = append(types, toInstanceType(st))
 	}
-
-	p.cachedTypes = types
-	p.cacheExpiry = time.Now().Add(cacheTTL)
+	p.store(types)
 
 	return p.applyAvailability(filterByLocations(types, locations)), nil
+}
+
+// freshCache returns the cached catalogue when it is present and unexpired.
+func (p *Provider) freshCache() ([]*cloudprovider.InstanceType, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.cachedTypes != nil && p.nowFn().Before(p.cacheExpiry) {
+		return p.cachedTypes, true
+	}
+	return nil, false
+}
+
+// staleCache returns the cached catalogue regardless of expiry, with its age.
+func (p *Provider) staleCache() ([]*cloudprovider.InstanceType, time.Duration, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.cachedTypes == nil {
+		return nil, 0, false
+	}
+	return p.cachedTypes, p.nowFn().Sub(p.cachedAt), true
+}
+
+// store replaces the cached catalogue and restarts its TTL.
+func (p *Provider) store(types []*cloudprovider.InstanceType) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.nowFn()
+	p.cachedTypes = types
+	p.cachedAt = now
+	p.cacheExpiry = now.Add(cacheTTL)
 }
 
 // MarkUnavailable records that a (serverType, location) offering failed with a
