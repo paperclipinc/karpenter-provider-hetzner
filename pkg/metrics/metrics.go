@@ -82,7 +82,8 @@ var (
 		Help:      "Total number of image lookups that failed without proving the image absent.",
 	})
 
-	// instanceTypeCacheTotal counts instance-type cache lookups by result (hit|miss).
+	// instanceTypeCacheTotal counts instance-type cache lookups by result
+	// (hit|miss|stale).
 	instanceTypeCacheTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "karpenter_hetzner",
 		Name:      "instance_type_cache_total",
@@ -145,4 +146,12 @@ func RecordCacheHit() {
 // RecordCacheMiss records an instance-type cache miss (triggers a fresh API fetch).
 func RecordCacheMiss() {
 	instanceTypeCacheTotal.WithLabelValues("miss").Inc()
+}
+
+// RecordCacheStale records that a refresh failed and the previously fetched
+// catalogue was served instead. Nothing else surfaces this: serving stale keeps
+// provisioning working, so the only symptom is a catalogue that quietly stops
+// tracking hcloud. Alert on a sustained non-zero rate.
+func RecordCacheStale() {
+	instanceTypeCacheTotal.WithLabelValues("stale").Inc()
 }
