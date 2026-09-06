@@ -25,16 +25,18 @@ import (
 func main() {
 	ctx, op := operator.NewOperator()
 
-	// Create the Hetzner Cloud API client.
-	hcloudClient, err := hetznerop.NewHCloudClient()
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to create Hetzner Cloud client")
-		return
-	}
-
 	cfg, err := hetznerop.LoadConfig()
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to load config")
+		return
+	}
+
+	// Create the Hetzner Cloud API client. Built from cfg so the API timeout is
+	// applied to the HTTP client the SDK is constructed with; it cannot be set
+	// afterwards.
+	hcloudClient, err := hetznerop.NewHCloudClient(cfg)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to create Hetzner Cloud client")
 		return
 	}
 

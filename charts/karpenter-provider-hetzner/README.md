@@ -43,6 +43,7 @@ Existing `v1alpha1` objects are not migrated automatically; recreate them under
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `auth.secretRef.name` | `hcloud-token` | Secret holding the Hetzner token |
 | `auth.secretRef.key` | `token` | Key within the secret |
+| `hcloud.apiTimeout` | `30s` | Bounds a single hcloud HTTP request (Go duration, max `5m`). Per request, not per operation |
 | `serviceAccount.create` | `true` | Create the service account |
 | `serviceAccount.name` | `karpenter` | Service account name |
 | `metrics.port` | `8080` | Prometheus metrics port |
