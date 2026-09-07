@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -30,6 +31,11 @@ type NetworkGetter interface {
 	GetByID(ctx context.Context, id int64) (*hcloud.Network, *hcloud.Response, error)
 }
 
+// LocationLister is the narrow hcloud locations API the controller needs.
+type LocationLister interface {
+	All(ctx context.Context) ([]*hcloud.Location, error)
+}
+
 // FirewallGetter is the narrow hcloud firewalls API the controller needs.
 type FirewallGetter interface {
 	GetByID(ctx context.Context, id int64) (*hcloud.Firewall, *hcloud.Response, error)
@@ -44,14 +50,15 @@ type SSHKeyGetter interface {
 type Controller struct {
 	kubeClient client.Client
 	networks   NetworkGetter
+	locations  LocationLister
 	firewalls  FirewallGetter
 	sshKeys    SSHKeyGetter
 	images     *imagefamily.Provider
 	recorder   events.EventRecorder
 }
 
-func NewController(kubeClient client.Client, networks NetworkGetter, firewalls FirewallGetter, sshKeys SSHKeyGetter, images *imagefamily.Provider) *Controller {
-	return &Controller{kubeClient: kubeClient, networks: networks, firewalls: firewalls, sshKeys: sshKeys, images: images}
+func NewController(kubeClient client.Client, networks NetworkGetter, locations LocationLister, firewalls FirewallGetter, sshKeys SSHKeyGetter, images *imagefamily.Provider) *Controller {
+	return &Controller{kubeClient: kubeClient, networks: networks, locations: locations, firewalls: firewalls, sshKeys: sshKeys, images: images}
 }
 
 // warnf emits a Warning event on the HCloudNodeClass when a recorder is
@@ -79,6 +86,17 @@ func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (
 		c.warnf(nc, "NetworkNotFound", "ValidateNetwork", "networkID %d does not exist", nc.Spec.NetworkID)
 	default:
 		nc.StatusConditions().SetTrue(apiv1.ConditionTypeNetworkReady)
+	}
+
+	// Validate declared locations and their network-zone coverage.
+	if reason, msg, unknown, ok := c.validateLocations(ctx, nc, net); ok {
+		nc.StatusConditions().SetTrue(apiv1.ConditionTypeLocationsReady)
+	} else if unknown {
+		nc.StatusConditions().SetUnknownWithReason(apiv1.ConditionTypeLocationsReady, reason, msg)
+		c.warnf(nc, reason, "ValidateLocations", "%s", msg)
+	} else {
+		nc.StatusConditions().SetFalse(apiv1.ConditionTypeLocationsReady, reason, msg)
+		c.warnf(nc, reason, "ValidateLocations", "%s", msg)
 	}
 
 	// Validate referenced firewalls and SSH keys exist.
@@ -197,6 +215,53 @@ func (c *Controller) Reconcile(ctx context.Context, nc *apiv1.HCloudNodeClass) (
 	// Requeue periodically so the Ready condition re-reflects reality (e.g. a
 	// network deleted out-of-band, or a newer image published).
 	return reconcile.Result{RequeueAfter: resyncInterval}, nil
+}
+
+// validateLocations checks that every declared location exists and has a subnet
+// in its network zone. Returns ok=true when all checks pass; unknown=true when
+// network-zone coverage cannot be validated.
+func (c *Controller) validateLocations(ctx context.Context, nc *apiv1.HCloudNodeClass, network *hcloud.Network) (reason, msg string, unknown, ok bool) {
+	locations, err := c.locations.All(ctx)
+	if err != nil {
+		return "LocationCheckFailed", err.Error(), true, false
+	}
+
+	available := make(map[string]*hcloud.Location, len(locations))
+	for _, location := range locations {
+		available[location.Name] = location
+	}
+
+	var missing []string
+	for _, name := range nc.Spec.Locations {
+		if available[name] == nil {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return "LocationNotFound", fmt.Sprintf("locations do not exist: %s", strings.Join(missing, ", ")), false, false
+	}
+
+	if network == nil {
+		return "NetworkUnavailable", "cannot validate location network zones", true, false
+	}
+
+	coveredZones := make(map[hcloud.NetworkZone]struct{}, len(network.Subnets))
+	for _, subnet := range network.Subnets {
+		coveredZones[subnet.NetworkZone] = struct{}{}
+	}
+
+	var uncovered []string
+	for _, name := range nc.Spec.Locations {
+		location := available[name]
+		if _, ok := coveredZones[location.NetworkZone]; !ok {
+			uncovered = append(uncovered, fmt.Sprintf("%s (%s)", name, location.NetworkZone))
+		}
+	}
+	if len(uncovered) > 0 {
+		return "NetworkZoneNotCovered", fmt.Sprintf("locations are not covered by network %d subnets: %s", nc.Spec.NetworkID, strings.Join(uncovered, ", ")), false, false
+	}
+
+	return "", "", false, true
 }
 
 // validateResources checks every referenced firewall and SSH key exists.

@@ -23,6 +23,26 @@ func (f fakeNetworks) GetByID(_ context.Context, _ int64) (*hcloud.Network, *hcl
 	return f.net, nil, nil
 }
 
+type fakeLocations struct {
+	locations []*hcloud.Location
+	err       error
+}
+
+func (f fakeLocations) All(_ context.Context) ([]*hcloud.Location, error) {
+	return f.locations, f.err
+}
+
+func validLocations() fakeLocations {
+	return fakeLocations{locations: []*hcloud.Location{{Name: "nbg1", NetworkZone: hcloud.NetworkZoneEUCentral}}}
+}
+
+func validNetwork() *hcloud.Network {
+	return &hcloud.Network{
+		ID:      1,
+		Subnets: []hcloud.NetworkSubnet{{NetworkZone: hcloud.NetworkZoneEUCentral}},
+	}
+}
+
 type fakeFirewalls struct{ fw *hcloud.Firewall }
 
 func (f fakeFirewalls) GetByID(_ context.Context, _ int64) (*hcloud.Firewall, *hcloud.Response, error) {
@@ -86,7 +106,7 @@ func TestReconcile_SetsReadyWhenValid(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -120,7 +140,7 @@ func TestReconcile_SingleArchImageIsReady(t *testing.T) {
 
 	// Cluster only has an amd64 image (no arm64) — the NodeClass must still be Ready.
 	img := imagefamily.NewProvider(amd64OnlyImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -147,7 +167,7 @@ func TestReconcile_ImageResolutionFails(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(emptyImages{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -183,7 +203,7 @@ func TestReconcile_ClearsStaleResolvedImages(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(emptyImages{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -204,7 +224,7 @@ func TestReconcile_NetworkNotFound(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: nil}, fakeFirewalls{}, fakeSSHKeys{}, img) // network missing
+	c := NewController(kube, fakeNetworks{net: nil}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img) // network missing
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -221,6 +241,84 @@ func TestReconcile_NetworkNotFound(t *testing.T) {
 	}
 }
 
+func TestReconcile_LocationNotFound(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "nonsense"}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	cond := got.StatusConditions().Get(apiv1.ConditionTypeLocationsReady)
+	if !cond.IsFalse() || cond.Reason != "LocationNotFound" || !strings.Contains(cond.Message, "nonsense") {
+		t.Errorf("unexpected LocationsReady condition: %+v", cond)
+	}
+	if got.StatusConditions().Root().IsTrue() {
+		t.Error("Ready should not be true when a location does not exist")
+	}
+}
+
+func TestReconcile_NetworkZoneNotCovered(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	nc.Spec.Locations = []string{"nbg1", "ash-dc1"}
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	locations := fakeLocations{locations: []*hcloud.Location{
+		{Name: "nbg1", NetworkZone: hcloud.NetworkZoneEUCentral},
+		{Name: "ash-dc1", NetworkZone: hcloud.NetworkZoneUSEast},
+	}}
+	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, locations, fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	cond := got.StatusConditions().Get(apiv1.ConditionTypeLocationsReady)
+	if !cond.IsFalse() || cond.Reason != "NetworkZoneNotCovered" || !strings.Contains(cond.Message, "ash-dc1 (us-east)") {
+		t.Errorf("unexpected LocationsReady condition: %+v", cond)
+	}
+	if got.StatusConditions().Root().IsTrue() {
+		t.Error("Ready should not be true when a location's network zone has no subnet")
+	}
+}
+
+func TestReconcile_LocationAPIFailureIsUnknown(t *testing.T) {
+	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
+	nc := newNodeClass()
+	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(nc).WithStatusSubresource(nc).Build()
+
+	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, fakeLocations{err: errors.New("rate limited (429)")}, fakeFirewalls{}, fakeSSHKeys{}, img)
+
+	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &apiv1.HCloudNodeClass{}
+	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(nc), got); err != nil {
+		t.Fatal(err)
+	}
+	cond := got.StatusConditions().Get(apiv1.ConditionTypeLocationsReady)
+	if cond.IsTrue() || cond.IsFalse() || cond.Reason != "LocationCheckFailed" {
+		t.Errorf("location API failure should be Unknown, got %+v", cond)
+	}
+}
+
 func TestReconcile_FirewallNotFound(t *testing.T) {
 	_ = apiv1.SchemeBuilder.AddToScheme(scheme.Scheme)
 	nc := newNodeClass()
@@ -228,7 +326,7 @@ func TestReconcile_FirewallNotFound(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme.Scheme).
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{fw: nil}, fakeSSHKeys{}, img) // firewall missing
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{fw: nil}, fakeSSHKeys{}, img) // firewall missing
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -261,7 +359,7 @@ func TestReconcile_UserDataSecretValid(t *testing.T) {
 		WithObjects(nc, secret).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -300,7 +398,7 @@ func TestReconcile_UserDataKeyMissing(t *testing.T) {
 		WithObjects(nc, secret).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -331,7 +429,7 @@ func TestReconcile_UserDataSecretMissing(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(fakeImages{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -385,7 +483,7 @@ func TestReconcile_KeepsResolvedImagesOnTransientError(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(unreadableImages{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -417,7 +515,7 @@ func TestReconcile_CarriesForwardArchOnTransientError(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(x86OKArmErrors{img: &hcloud.Image{ID: 42, Description: "Ubuntu 24.04"}})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -456,7 +554,7 @@ func TestReconcile_RejectsWrongArchImage(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(wrongArchImages{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -492,7 +590,7 @@ func TestReconcile_DoesNotCarryForwardAcrossSpecChange(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(unreadableImages{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -539,7 +637,7 @@ func TestReconcile_ReportsDefinitiveErrorAlongsideTransient(t *testing.T) {
 		WithObjects(nc).WithStatusSubresource(nc).Build()
 
 	img := imagefamily.NewProvider(definitiveX86TransientArm{})
-	c := NewController(kube, fakeNetworks{net: &hcloud.Network{ID: 1}}, fakeFirewalls{}, fakeSSHKeys{}, img)
+	c := NewController(kube, fakeNetworks{net: validNetwork()}, validLocations(), fakeFirewalls{}, fakeSSHKeys{}, img)
 	if _, err := c.Reconcile(context.Background(), nc.DeepCopy()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 // Status condition types for HCloudNodeClass.
 const (
 	ConditionTypeImagesReady    = "ImagesReady"
+	ConditionTypeLocationsReady = "LocationsReady"
 	ConditionTypeNetworkReady   = "NetworkReady"
 	ConditionTypeResourcesReady = "ResourcesReady"
 	ConditionTypeUserDataReady  = "UserDataReady"
@@ -120,7 +121,7 @@ type HCloudNodeClassStatus struct {
 	ResolvedImages []ResolvedImage `json:"resolvedImages,omitempty"`
 }
 
-var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady, ConditionTypeUserDataReady)
+var conditionTypes = status.NewReadyConditions(ConditionTypeImagesReady, ConditionTypeLocationsReady, ConditionTypeNetworkReady, ConditionTypeResourcesReady, ConditionTypeUserDataReady)
 
 func (in *HCloudNodeClass) GetConditions() []status.Condition {
 	return in.Status.Conditions
